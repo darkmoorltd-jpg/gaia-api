@@ -1,9 +1,11 @@
-
 import os
 import requests
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://pxvtvuwlpzwlkdoxjrep.supabase.co")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+
+if not SUPABASE_SERVICE_KEY:
+    SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 HEADERS = {
     "apikey": SUPABASE_SERVICE_KEY,
@@ -14,7 +16,15 @@ HEADERS = {
 
 
 def deduct_scan(user_id, cost=1):
-    url = SUPABASE_URL + "/rest/v1/user_scans?user_id=eq." + user_id + "&select=scans_remaining"
+    if not SUPABASE_SERVICE_KEY:
+        raise RuntimeError("SUPABASE_SERVICE_KEY not configured")
+
+    url = (
+        SUPABASE_URL
+        + "/rest/v1/user_scans?user_id=eq."
+        + user_id
+        + "&select=scans_remaining"
+    )
     r = requests.get(url, headers=HEADERS, timeout=10)
     r.raise_for_status()
     rows = r.json()
