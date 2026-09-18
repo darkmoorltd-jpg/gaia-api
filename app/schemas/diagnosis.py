@@ -1,6 +1,5 @@
-
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 
 class Prediction(BaseModel):
@@ -14,3 +13,5 @@ class DiagnosisResponse(BaseModel):
     model: str
     processingMs: int
     scansRemaining: int
+    historyId: Optional[int] = None
+    gradcamBase64: Optional[str] = None

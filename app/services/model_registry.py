@@ -126,6 +126,28 @@ class ModelRegistry:
         self._cache[key] = (model, labels)
         return self._cache[key]
 
+    def predict_with_tensor(self, key, img):
+        model, labels = self._load(key)
+        cfg = MODEL_CONFIG[key]
+        img_size = cfg.get("image_size", 224)
+        transform = Compose([
+            Resize((img_size, img_size)),
+            ToTensor(),
+            Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        tensor = transform(img).unsqueeze(0)
+        with torch.enable_grad():
+            logits = model(tensor)
+            probs = torch.softmax(logits, dim=1)[0].detach().numpy()
+        preds = sorted(
+            [
+                {"label": labels[i], "confidence": float(probs[i] * 100)}
+                for i in range(len(labels))
+            ],
+            key=lambda p: -p["confidence"],
+        )
+        return preds[:10], model, tensor
+
     def predict(self, key, img):
         model, labels = self._load(key)
         cfg = MODEL_CONFIG[key]
