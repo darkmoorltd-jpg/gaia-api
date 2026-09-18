@@ -1,9 +1,16 @@
 
 import os
+import gc
 import torch
 import requests
 from PIL import Image
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
+
+# Memory optimizations for small containers (Render free tier = 512 MB)
+torch.set_num_threads(1)
+torch.set_grad_enabled(False)
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 BASE_URL = "https://github.com/darkmoorltd-jpg/GAIA/releases/download/v1.0"
 MODELS_DIR = os.environ.get("MODELS_DIR", "/tmp/gaia-models")
@@ -115,11 +122,24 @@ class ModelRegistry:
     def _load(self, key):
         if key in self._cache:
             return self._cache[key]
+
+        # Free other models from RAM before loading a new one
+        # (Render free tier = 512 MB — one model at a time)
+        if self._cache:
+            for k in list(self._cache.keys()):
+                if k != key:
+                    del self._cache[k]
+            gc.collect()
+
         cfg = MODEL_CONFIG[key]
         path = self._download(key, cfg["url"])
         state = torch.load(path, map_location="cpu", weights_only=False)
         model = build_model_from_state_dict(state, cfg["num_classes"])
         model.eval()
+
+        # Delete the state dict reference to free memory
+        del state
+        gc.collect()
         labels = cfg["labels"]
         if labels is None:
             labels = ["Class " + str(i) for i in range(cfg["num_classes"])]
