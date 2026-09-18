@@ -128,8 +128,23 @@ class ModelRegistry:
 
     def predict_with_tensor(self, key, img):
         model, labels = self._load(key)
-        cfg = MODEL_CONFIG[key]
-        img_size = cfg.get("image_size", 224)
+
+        # Auto-detect image size from the model's patch embedding
+        # (ViT pos_embed shape reveals the grid → img_size = grid * patch_size)
+        img_size = 224
+        try:
+            backbone = model.backbone
+            # timm ViT stores pos_embed on the module
+            pos = backbone.pos_embed  # (1, N+1, D)
+            num_patches = pos.shape[1] - 1
+            grid = int(num_patches ** 0.5)
+            patch_size = backbone.patch_embed.patch_size
+            if isinstance(patch_size, tuple):
+                patch_size = patch_size[0]
+            img_size = grid * patch_size
+        except Exception:
+            pass
+
         transform = Compose([
             Resize((img_size, img_size)),
             ToTensor(),
@@ -150,8 +165,17 @@ class ModelRegistry:
 
     def predict(self, key, img):
         model, labels = self._load(key)
-        cfg = MODEL_CONFIG[key]
-        img_size = cfg.get("image_size", 224)
+        img_size = 224
+        try:
+            pos = model.backbone.pos_embed
+            num_patches = pos.shape[1] - 1
+            grid = int(num_patches ** 0.5)
+            ps = model.backbone.patch_embed.patch_size
+            if isinstance(ps, tuple):
+                ps = ps[0]
+            img_size = grid * ps
+        except Exception:
+            pass
         transform = Compose([
             Resize((img_size, img_size)),
             ToTensor(),
