@@ -32,6 +32,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="GAIA Model API", version="1.0.0", lifespan=lifespan)
+from app.routers.webhook import router as webhook_router
+app.include_router(webhook_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
