@@ -1,39 +1,21 @@
-import io
+import os
 import time
 from contextlib import asynccontextmanager
-
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image
+import io
+import requests
+from pydantic import BaseModel
+from typing import List, Optional
 
 from app.services.auth import verify_supabase_token
 from app.services.model_registry import ModelRegistry
-from app.services.scan_service import deduct_scan, refund_scan
-from app.services.history_service import save_diagnosis
-from app.services.gradcam import generate_gradcam_base64
+from app.services.scan_service import deduct_scan
 from app.schemas.diagnosis import DiagnosisResponse
 
 registry = None
-
-CONTEXT_MAP = {
-    "maize": "crop",
-    "rice_10class": "crop",
-    "millet_3class": "crop",
-    "soybean_14class": "crop",
-    "pepper_13class": "crop",
-    "cabbage_8class": "crop",
-    "apple": "crop",
-    "cassava": "crop",
-    "coffee": "crop",
-    "grape": "crop",
-    "sugarcane": "crop",
-    "tea": "crop",
-    "pests_102class": "pest",
-    "soil_11class": "soil",
-    "cattle": "livestock",
-    "poultry": "livestock",
-}
 
 
 @asynccontextmanager
@@ -46,7 +28,7 @@ async def lifespan(app: FastAPI):
     print("GAIA API shutting down")
 
 
-app = FastAPI(title="GAIA Model API", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="GAIA Model API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,7 +43,7 @@ app.add_middleware(
 async def health():
     return {
         "ok": True,
-        "version": "1.1.0",
+        "version": "1.0.0",
         "models_loaded": list(registry.loaded_keys()) if registry else [],
     }
 
@@ -90,9 +72,7 @@ async def diagnose(
     except Exception as e:
         raise HTTPException(401, "Invalid token: " + str(e))
 
-    user_id = user.get("sub")
-    if not user_id:
-        raise HTTPException(401, "Token missing sub claim")
+    user_id = user["sub"]
 
     if not registry.has(model):
         raise HTTPException(404, "Unknown model: " + model)
@@ -109,31 +89,16 @@ async def diagnose(
     try:
         remaining = deduct_scan(user_id, cost=1)
     except Exception as e:
-        raise HTTPException(402, "Scan error: " + str(e))
+        raise HTTPException(402, "Insufficient scans: " + str(e))
 
     try:
-        preds, model_obj, tensor = registry.predict_with_tensor(model, img)
+        preds = registry.predict(model, img)
     except Exception as e:
         try:
-            refund_scan(user_id, amount=1)
+            deduct_scan(user_id, cost=-1)
         except Exception:
             pass
         raise HTTPException(500, "Inference failed: " + str(e))
-
-    context_type = CONTEXT_MAP.get(model, "crop")
-    history_id = save_diagnosis(user_id, model, context_type, preds)
-
-    gradcam_b64 = None
-    try:
-        from app.services.model_registry import MODEL_CONFIG
-        labels = MODEL_CONFIG[model].get("labels")
-        if labels:
-            top_label = preds[0]["label"]
-            if top_label in labels:
-                idx = labels.index(top_label)
-                gradcam_b64 = generate_gradcam_base64(model_obj, tensor, idx)
-    except Exception:
-        gradcam_b64 = None
 
     elapsed = int((time.time() - start) * 1000)
 
@@ -143,9 +108,79 @@ async def diagnose(
         model=model,
         processingMs=elapsed,
         scansRemaining=remaining,
-        historyId=history_id,
-        gradcamBase64=gradcam_b64,
     )
+
+
+# ============================================
+# CHAT — DeepSeek proxy for GAIA Voice
+# ============================================
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    max_tokens: Optional[int] = 1500
+
+
+GAIA_SYSTEM_PROMPT = (
+    "You are GAIA, an expert agricultural advisor built by Darkmoor Ltd in Nigeria. "
+    "Give practical, specific, Nigeria and Africa-context answers. "
+    "Be concise — 2 to 6 short paragraphs. Use plain language. "
+    "Never mention DeepSeek, OpenAI, or any AI provider — you ARE GAIA."
+)
+
+
+@app.post("/chat")
+async def chat(body: ChatRequest, authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing Bearer token")
+    token = authorization.split(" ", 1)[1]
+    try:
+        verify_supabase_token(token)
+    except Exception as e:
+        raise HTTPException(401, "Invalid token: " + str(e))
+
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "DEEPSEEK_API_KEY not configured on server")
+
+    msgs = [{"role": "system", "content": GAIA_SYSTEM_PROMPT}]
+    for m in body.messages:
+        msgs.append({
+            "role": "assistant" if m.role == "assistant" else "user",
+            "content": m.content,
+        })
+
+    try:
+        r = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer " + api_key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "deepseek-chat",
+                "messages": msgs,
+                "max_tokens": body.max_tokens or 1500,
+                "temperature": 0.7,
+            },
+            timeout=90,
+        )
+    except Exception as e:
+        raise HTTPException(500, "Upstream error: " + str(e))
+
+    if r.status_code != 200:
+        raise HTTPException(500, "DeepSeek " + str(r.status_code) + ": " + r.text[:200])
+
+    data = r.json()
+    try:
+        reply = data["choices"][0]["message"]["content"]
+    except Exception:
+        raise HTTPException(500, "Bad response from model")
+
+    return {"reply": reply}
 
 
 @app.exception_handler(HTTPException)
