@@ -16,5 +16,7 @@ services:
         sync: false
       - key: MODELS_DIR
         value: /tmp/gaia-models
+      - key: DEEPSEEK_API_KEY
+        sync: false
       - key: PYTHON_VERSION
         value: 3.11.9

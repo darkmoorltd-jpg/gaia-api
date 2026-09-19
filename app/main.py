@@ -16,6 +16,7 @@ from app.services.scan_service import deduct_scan
 from app.services.satellite import fetch_tile
 from app.services.paystack_wallet import list_banks, create_recipient, initiate_transfer
 from app.schemas.diagnosis import DiagnosisResponse
+from app.routers.chat import router as chat_router
 
 registry = None
 
@@ -38,6 +39,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(chat_router)
 
 
 # ============================================
