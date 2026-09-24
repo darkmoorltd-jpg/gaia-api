@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: gaia-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: frankfurt
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: SUPABASE_URL
+        value: https://pxvtvuwlpzwlkdoxjrep.supabase.co
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: MODELS_DIR
+        value: /tmp/gaia-models
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.9
