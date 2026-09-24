@@ -8,6 +8,13 @@ BASE_URL = "https://github.com/darkmoorltd-jpg/GAIA/releases/download/v1.0"
 MODELS_DIR = "/tmp/gaia-models"
 
 MODEL_CONFIG = {
+    "cattle": {
+        "url": BASE_URL + "/gaia_cattle.pt",
+        "num_classes": 3,
+        "labels": ["Foot-and-Mouth Disease", "Healthy", "Lumpy Skin Disease"],
+        "image_size": 224,
+    },
+
     "maize": {
         "url": BASE_URL + "/gaia_maize_4class.pt",
         "num_classes": 4,
