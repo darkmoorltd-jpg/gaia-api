@@ -5,9 +5,9 @@ import requests
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GROQ_BASE = "https://api.groq.com/openai/v1"
 
-TEXT_MODEL = "llama-3.3-70b-versatile"
-VISION_MODEL = "llama-3.2-90b-vision-preview"
-WHISPER_MODEL = "whisper-large-v3"
+TEXT_MODEL = "openai/gpt-oss-120b"
+VISION_MODEL = "qwen/qwen3.8-27b"
+WHISPER_MODEL = "whisper-large-v3-turbo"
 
 SYSTEM_PROMPT = """You are GAIA, an expert African agricultural advisor built by Darkmoor Ltd. You help smallholder farmers with crop disease, pests, soil, livestock, weather, and general farming questions.
 
