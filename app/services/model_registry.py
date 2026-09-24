@@ -8,6 +8,13 @@ BASE_URL = "https://github.com/darkmoorltd-jpg/GAIA/releases/download/v1.0"
 MODELS_DIR = "/tmp/gaia-models"
 
 MODEL_CONFIG = {
+    "maize": {
+        "url": BASE_URL + "/gaia_maize_4class.pt",
+        "num_classes": 4,
+        "labels": ["Blight", "Common_Rust", "Gray_Leaf_Spot", "Healthy"],
+        "image_size": 224,
+    },
+
     "rice_6class": {
         "url": BASE_URL + "/gaia_rice_6class.pt",
         "num_classes": 6,
