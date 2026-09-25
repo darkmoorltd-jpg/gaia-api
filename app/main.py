@@ -12,6 +12,7 @@ from app.services.auth import verify_supabase_token
 from app.services.model_registry import ModelRegistry
 from app.services.scan_service import deduct_scan
 from app.schemas.diagnosis import DiagnosisResponse
+from app.services.recommendations import get_recommendations
 from app.routers.agronomist import router as agronomist_router
 
 registry = None
@@ -95,9 +96,20 @@ async def diagnose(
         print("Scan deduction error: " + str(e))
         raise HTTPException(402, "Insufficient scans: " + str(e))
 
+    recommendations = None
     try:
         preds, gradcam_b64, top_idx = registry.predict_with_cam(model, img)
         print("Grad-CAM present: " + str(gradcam_b64 is not None))
+
+        # Generate recommendations unless disabled
+        try:
+            recommendations = get_recommendations(
+                model_key=model,
+                top_label=preds[0]["label"],
+                confidence=preds[0]["confidence"],
+            )
+        except Exception as rec_err:
+            print("Recommendation error: " + str(rec_err))
     except Exception as e:
         print("Inference error: " + str(e))
         traceback.print_exc()
@@ -117,6 +129,7 @@ async def diagnose(
         scansRemaining=remaining,
         gradcam_image=gradcam_b64,
         top_class_index=top_idx,
+        recommendations=recommendations,
     )
 
 

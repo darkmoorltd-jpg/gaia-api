@@ -1,4 +1,3 @@
-
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -16,3 +15,4 @@ class DiagnosisResponse(BaseModel):
     scansRemaining: int
     gradcam_image: Optional[str] = None
     top_class_index: int = 0
+    recommendations: Optional[str] = None
