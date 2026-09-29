@@ -12,6 +12,7 @@ from app.services.auth import verify_supabase_token
 from app.services.model_registry import ModelRegistry
 from app.services.scan_service import deduct_scan
 from app.schemas.diagnosis import DiagnosisResponse
+from app.rag import router as rag_router
 from app.services.recommendations import get_recommendations
 from app.routers.agronomist import router as agronomist_router
 
@@ -31,6 +32,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="GAIA Model API", version="1.0.0", lifespan=lifespan)
 
 app.include_router(agronomist_router)
+
+app.include_router(rag_router)
 
 app.add_middleware(
     CORSMiddleware,
