@@ -8,7 +8,7 @@ from PIL import Image
 import io
 import traceback
 
-from app.services.auth import verify_supabase_token
+from app.services.auth import verify_supabase_token\nfrom app.routers.voice import router as voice_router\nfrom app.routers.chat import router as chat_router\nfrom app.routers.rag import router as rag_router
 from app.services.model_registry import ModelRegistry
 from app.services.scan_service import deduct_scan
 from app.schemas.diagnosis import DiagnosisResponse
@@ -38,7 +38,7 @@ app.include_router(rag_router)
 
 app.include_router(admin_router)
 
-app.add_middleware(
+app.include_router(voice_router)\napp.include_router(chat_router)\napp.include_router(rag_router)\n\napp.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
