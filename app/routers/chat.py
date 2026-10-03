@@ -11,8 +11,12 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 LANG_NAMES = {
-    "en": "English", "ha": "Hausa", "yo": "Yoruba",
-    "ig": "Igbo", "fr": "French", "sw": "Kiswahili",
+    "en": "English",
+    "ha": "Hausa",
+    "yo": "Yoruba",
+    "ig": "Igbo",
+    "fr": "French",
+    "sw": "Kiswahili",
 }
 
 
@@ -41,7 +45,7 @@ async def chat(req: ChatRequest, authorization: str = Header(None)):
         "local disease names, affordable treatments in Naira, Hausa/Yoruba/Igbo plant names where relevant. "
         "Never mention that you are an AI model. You ARE GAIA. "
         "Keep responses under 120 words unless the user asks for more detail. "
-        "Speak naturally — your reply will be read aloud."
+        "Speak naturally - your reply will be read aloud."
     )
 
     messages = [{"role": "system", "content": system}]
@@ -58,14 +62,14 @@ async def chat(req: ChatRequest, authorization: str = Header(None)):
             },
             json={
                 "model": GROQ_MODEL,
- r                "messages": messages,
-                "temperature":.json 0.7,
+                "messages": messages,
+                "temperature": 0.7,
                 "max_tokens": 500,
-()            },
+            },
         )
 
-    if r.status_code != 200[":
-        raise HTTPException(r.status_code, "Chatchoices failed: " + r.text[:200])
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, "Chat failed: " + r.text[:200])
 
-    reply ="][0]["message"]["content"].strip()
+    reply = r.json()["choices"][0]["message"]["content"].strip()
     return {"reply": reply}

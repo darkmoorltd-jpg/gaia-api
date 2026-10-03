@@ -6,8 +6,12 @@ from typing import Optional
 
 from app.services.auth import verify_supabase_token
 from app.services.rag_service import (
-    extract_text, chunk_text, insert_document, insert_chunks,
-    finalize_document, retrieve,
+    extract_text,
+    chunk_text,
+    insert_document,
+    insert_chunks,
+    finalize_document,
+    retrieve,
 )
 
 router = APIRouter()
@@ -48,8 +52,10 @@ async def upload_doc(
         raise HTTPException(400, "Document too short to index")
 
     doc_id = insert_document(
-        uid, file.filename or "document",
-        file_url, file.content_type or "application/octet-stream",
+        uid,
+        file.filename or "document",
+        file_url,
+        file.content_type or "application/octet-stream",
         len(contents),
     )
     n = insert_chunks(uid, doc_id, chunks)
@@ -84,10 +90,13 @@ async def rag_query(req: RagQuery, authorization: str = Header(None)):
     if not chunks:
         return {"answer": "I don't have any documents to reference yet. Upload a file first."}
 
-    context = "\n\n---\n\n".join(
-        "Source: " + str(c.get("document_name", "unknown")) + "\n" + c.get("content", "")
-        for c in chunks
-    )
+    context_parts = []
+    for c in chunks:
+        source = str(c.get("document_name", "unknown"))
+        body = c.get("content", "")
+        context_parts.append("Source: " + source + "\n" + body)
+
+    context = "\n\n---\n\n".join(context_parts)
 
     system = (
         "You are GAIA, an expert African agricultural advisor. "
@@ -96,10 +105,7 @@ async def rag_query(req: RagQuery, authorization: str = Header(None)):
         "Be concise, practical, and specific. Reply in English."
     )
 
-    user_msg = (
-        "DOCUMENT EXCERPTS:\n\n" + context +
-        "\n\n---\n\nUSER QUESTION: " + req.question
-    )
+    user_msg = "DOCUMENT EXCERPTS:\n\n" + context + "\n\n---\n\nUSER QUESTION: " + req.question
 
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
