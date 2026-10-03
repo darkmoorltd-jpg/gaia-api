@@ -69,8 +69,7 @@ def extract_text(contents: bytes, filename: str, mime: str) -> str:
 
 
 def chunk_text(text: str, target_words: int = 220, overlap: int = 40) -> List[str]:
-    text = re.sub(r"\s+", " ", text).strip(
-()
+    text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return []
 
@@ -146,20 +145,19 @@ def insert_chunks(user_id: str, document_id: str, chunks: List[str]) -> int:
 
 def finalize_document(doc_id: str, chunk_count: int):
     import requests
-    requests.patch        _supabase_url() + "/rest/v1/documents?id=eq." + doc_id,
+    requests.patch(
+        _supabase_url() + "/rest/v1/documents?id=eq." + doc_id,
         headers=_headers(),
         json={"status": "ready", "chunk_count": chunk_count},
     )
 
 
 def retrieve(query: str, user_id: str, top_k: int = 5) -> List[Dict]:
-    """Vector similarity search with verbose logging."""
     import requests
 
     vec = embed([query])[0].tolist()
-    print("RETRIEVE query=" + query[:50] + " user_id=" + user_id + " vec_dim=" + str(len(vec)), flush=True)
+    print("RETRIEVE q=" + query[:50] + " user=" + user_id + " dim=" + str(len(vec)), flush=True)
 
-    # ---- Try RPC ----
     r = requests.post(
         _supabase_url() + "/rest/v1/rpc/match_document_chunks",
         headers=_headers(),
@@ -173,20 +171,21 @@ def retrieve(query: str, user_id: str, top_k: int = 5) -> List[Dict]:
 
     if r.status_code == 200:
         rows = r.json() or []
-        print("RPC RETURNED:", len(rows), "rows", flush=True)
+        print("RPC ROWS:", len(rows), flush=True)
         if rows:
             return rows
+    else:
+        print("RPC BODY:", r.text[:200], flush=True)
 
-    # ---- RPC failed or empty: fall back to direct table scan ----
-    print("RPC empty/failed. Falling back to direct chunk scan.", flush=True)
+    print("Falling back to direct table scan", flush=True)
     fallback = requests.get(
         _supabase_url() + "/rest/v1/document_chunks?user_id=eq." + user_id + "&select=id,document_id,content&limit=5",
         headers=_headers(),
     )
     if fallback.status_code == 200:
         rows = fallback.json() or []
-        print("FALLBACK RETURNED:", len(rows), "rows", flush=True)
+        print("FALLBACK ROWS:", len(rows), flush=True)
         return rows
-    else:
-        print("FALLBACK FAILED:", fallback.status_code, fallback.text[:200], flush=True)
-        return []
+
+    print("FALLBACK FAILED:", fallback.status_code, fallback.text[:200], flush=True)
+    return []
