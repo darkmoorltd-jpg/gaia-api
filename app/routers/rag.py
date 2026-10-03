@@ -18,7 +18,7 @@ router = APIRouter()
 
 GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 
 class RagQuery(BaseModel):
@@ -126,7 +126,7 @@ async def rag_query(req: RagQuery, authorization: str = Header(None)):
         )
 
     if r.status_code != 200:
-        raise HTTPException(r.status_code, "Chat failed: " + r.text[:200])
+        raise HTTPException(r.status_code, "Chat failed: " + r.text[:300])
 
     answer = r.json()["choices"][0]["message"]["content"].strip()
     return {"answer": answer}

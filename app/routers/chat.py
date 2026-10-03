@@ -8,15 +8,11 @@ router = APIRouter()
 
 GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 LANG_NAMES = {
-    "en": "English",
-    "ha": "Hausa",
-    "yo": "Yoruba",
-    "ig": "Igbo",
-    "fr": "French",
-    "sw": "Kiswahili",
+    "en": "English", "ha": "Hausa", "yo": "Yoruba",
+    "ig": "Igbo", "fr": "French", "sw": "Kiswahili",
 }
 
 
@@ -42,7 +38,7 @@ async def chat(req: ChatRequest, authorization: str = Header(None)):
         "You are GAIA, an expert African agricultural advisor built by Darkmoor Ltd in Nigeria. "
         "Always respond in " + lang + ". "
         "Keep answers practical, specific, and warm. Use local context: Nigerian crops, "
-        "local disease names, affordable treatments in Naira, Hausa/Yoruba/Igbo plant names where relevant. "
+        "local disease names, affordable treatments in Naira, local plant names where relevant. "
         "Never mention that you are an AI model. You ARE GAIA. "
         "Keep responses under 120 words unless the user asks for more detail. "
         "Speak naturally - your reply will be read aloud."
@@ -69,7 +65,7 @@ async def chat(req: ChatRequest, authorization: str = Header(None)):
         )
 
     if r.status_code != 200:
-        raise HTTPException(r.status_code, "Chat failed: " + r.text[:200])
+        raise HTTPException(r.status_code, "Chat failed: " + r.text[:300])
 
     reply = r.json()["choices"][0]["message"]["content"].strip()
     return {"reply": reply}

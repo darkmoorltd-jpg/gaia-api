@@ -54,7 +54,7 @@ async def health():
         "version": "1.0.0",
         "models_loaded": list(registry.loaded_keys()) if registry else [],
         "env": {
-            "SUPABASE_URL": bool(os.environ.get("SUPABASE_URL")),
+            "SUPABASE_URL": bool(os.environ.get("SUPABASE_URL", "https://pxvtvuwlpzwlkdoxjrep.supabase.co")),
             "SUPABASE_SERVICE_KEY": bool(os.environ.get("SUPABASE_SERVICE_KEY")),
             "GROQ_API_KEY": bool(os.environ.get("GROQ_API_KEY")),
             "SUPABASE_JWT_SECRET": bool(os.environ.get("SUPABASE_JWT_SECRET")),

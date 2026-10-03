@@ -12,7 +12,7 @@ def _supabase_url() -> str:
 def _supabase_key() -> str:
     key = os.environ.get("SUPABASE_SERVICE_KEY", "")
     if not key:
-        raise RuntimeError("SUPABASE_SERVICE_KEY not set in environment")
+        raise RuntimeError("SUPABASE_SERVICE_KEY not set")
     return key
 
 
@@ -69,7 +69,8 @@ def extract_text(contents: bytes, filename: str, mime: str) -> str:
 
 
 def chunk_text(text: str, target_words: int = 220, overlap: int = 40) -> List[str]:
-    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", text).strip(
+()
     if not text:
         return []
 
@@ -137,22 +138,28 @@ def insert_chunks(user_id: str, document_id: str, chunks: List[str]) -> int:
         headers=_headers(),
         json=rows,
     )
+    if r.status_code not in (200, 201):
+        print("CHUNK INSERT FAILED:", r.status_code, r.text[:300], flush=True)
     r.raise_for_status()
     return len(rows)
 
 
 def finalize_document(doc_id: str, chunk_count: int):
     import requests
-    requests.patch(
-        _supabase_url() + "/rest/v1/documents?id=eq." + doc_id,
+    requests.patch        _supabase_url() + "/rest/v1/documents?id=eq." + doc_id,
         headers=_headers(),
         json={"status": "ready", "chunk_count": chunk_count},
     )
 
 
 def retrieve(query: str, user_id: str, top_k: int = 5) -> List[Dict]:
+    """Vector similarity search with verbose logging."""
     import requests
+
     vec = embed([query])[0].tolist()
+    print("RETRIEVE query=" + query[:50] + " user_id=" + user_id + " vec_dim=" + str(len(vec)), flush=True)
+
+    # ---- Try RPC ----
     r = requests.post(
         _supabase_url() + "/rest/v1/rpc/match_document_chunks",
         headers=_headers(),
@@ -162,6 +169,24 @@ def retrieve(query: str, user_id: str, top_k: int = 5) -> List[Dict]:
             "match_count": top_k,
         },
     )
-    if r.status_code != 200:
+    print("RPC STATUS:", r.status_code, flush=True)
+
+    if r.status_code == 200:
+        rows = r.json() or []
+        print("RPC RETURNED:", len(rows), "rows", flush=True)
+        if rows:
+            return rows
+
+    # ---- RPC failed or empty: fall back to direct table scan ----
+    print("RPC empty/failed. Falling back to direct chunk scan.", flush=True)
+    fallback = requests.get(
+        _supabase_url() + "/rest/v1/document_chunks?user_id=eq." + user_id + "&select=id,document_id,content&limit=5",
+        headers=_headers(),
+    )
+    if fallback.status_code == 200:
+        rows = fallback.json() or []
+        print("FALLBACK RETURNED:", len(rows), "rows", flush=True)
+        return rows
+    else:
+        print("FALLBACK FAILED:", fallback.status_code, fallback.text[:200], flush=True)
         return []
-    return r.json() or []
