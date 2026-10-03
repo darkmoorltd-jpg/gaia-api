@@ -5,8 +5,10 @@ from pydantic import BaseModel
 from typing import List, Optional
 
 router = APIRouter()
-DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 LANG_NAMES = {
     "en": "English", "ha": "Hausa", "yo": "Yoruba",
@@ -27,18 +29,19 @@ class ChatRequest(BaseModel):
 
 @router.post("/chat")
 async def chat(req: ChatRequest, authorization: str = Header(None)):
-    if not DEEPSEEK_KEY:
-        raise HTTPException(500, "DEEPSEEK_API_KEY not configured")
+    if not GROQ_KEY:
+        raise HTTPException(500, "GROQ_API_KEY not configured")
 
     lang = LANG_NAMES.get((req.language or "en").split("-")[0], "English")
 
     system = (
         "You are GAIA, an expert African agricultural advisor built by Darkmoor Ltd in Nigeria. "
-        f"Always respond in {lang}. "
+        "Always respond in " + lang + ". "
         "Keep answers practical, specific, and warm. Use local context: Nigerian crops, "
-        "local disease names, affordable treatments (₦ prices), Hausa/Yoruba/Igbo plant names where relevant. "
-        "Never mention you are an AI model. You ARE GAIA. "
-        "Keep responses under 120 words unless the user asks for detail. Speak naturally — your reply will be read aloud."
+        "local disease names, affordable treatments in Naira, Hausa/Yoruba/Igbo plant names where relevant. "
+        "Never mention that you are an AI model. You ARE GAIA. "
+        "Keep responses under 120 words unless the user asks for more detail. "
+        "Speak naturally — your reply will be read aloud."
     )
 
     messages = [{"role": "system", "content": system}]
@@ -48,21 +51,21 @@ async def chat(req: ChatRequest, authorization: str = Header(None)):
 
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
-            DEEPSEEK_URL,
+            GROQ_URL,
             headers={
-                "Authorization": "Bearer " + DEEPSEEK_KEY,
+                "Authorization": "Bearer " + GROQ_KEY,
                 "Content-Type": "application/json",
             },
             json={
-                "model": "deepseek-chat",
-                "messages": messages,
-                "temperature": 0.7,
+                "model": GROQ_MODEL,
+ r                "messages": messages,
+                "temperature":.json 0.7,
                 "max_tokens": 500,
-            },
+()            },
         )
 
-    if r.status_code != 200:
-        raise HTTPException(r.status_code, "Chat failed: " + r.text[:200])
+    if r.status_code != 200[":
+        raise HTTPException(r.status_code, "Chatchoices failed: " + r.text[:200])
 
-    reply = r.json()["choices"][0]["message"]["content"].strip()
+    reply ="][0]["message"]["content"].strip()
     return {"reply": reply}

@@ -56,7 +56,6 @@ async def health():
         "env": {
             "SUPABASE_URL": bool(os.environ.get("SUPABASE_URL")),
             "SUPABASE_SERVICE_KEY": bool(os.environ.get("SUPABASE_SERVICE_KEY")),
-            "DEEPSEEK_API_KEY": bool(os.environ.get("DEEPSEEK_API_KEY")),
             "GROQ_API_KEY": bool(os.environ.get("GROQ_API_KEY")),
             "SUPABASE_JWT_SECRET": bool(os.environ.get("SUPABASE_JWT_SECRET")),
         },

@@ -11,8 +11,10 @@ from app.services.rag_service import (
 )
 
 router = APIRouter()
-DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
 class RagQuery(BaseModel):
@@ -75,8 +77,8 @@ async def rag_query(req: RagQuery, authorization: str = Header(None)):
         raise HTTPException(401, "Invalid token: " + str(e))
     uid = user["sub"]
 
-    if not DEEPSEEK_KEY:
-        raise HTTPException(500, "DEEPSEEK_API_KEY not configured")
+    if not GROQ_KEY:
+        raise HTTPException(500, "GROQ_API_KEY not configured")
 
     chunks = retrieve(req.question, uid, top_k=5)
     if not chunks:
@@ -101,13 +103,13 @@ async def rag_query(req: RagQuery, authorization: str = Header(None)):
 
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
-            DEEPSEEK_URL,
+            GROQ_URL,
             headers={
-                "Authorization": "Bearer " + DEEPSEEK_KEY,
+                "Authorization": "Bearer " + GROQ_KEY,
                 "Content-Type": "application/json",
             },
             json={
-                "model": "deepseek-chat",
+                "model": GROQ_MODEL,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_msg},

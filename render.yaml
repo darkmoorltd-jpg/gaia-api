@@ -12,8 +12,6 @@ services:
         value: https://pxvtvuwlpzwlkdoxjrep.supabase.co
       - key: SUPABASE_SERVICE_KEY
         sync: false
-      - key: DEEPSEEK_API_KEY
-        sync: false
       - key: GROQ_API_KEY
         sync: false
       - key: SUPABASE_JWT_SECRET
