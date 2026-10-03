@@ -21,11 +21,15 @@ registry = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global registry
-    print("GAIA API starting...")
-    registry = ModelRegistry()
-    print("Registry ready")
+    print("GAIA API starting...", flush=True)
+    try:
+        registry = ModelRegistry()
+        print("Registry ready", flush=True)
+    except Exception as e:
+        print("Registry failed:", e, flush=True)
+        registry = None
     yield
-    print("GAIA API shutting down")
+    print("GAIA API shutting down", flush=True)
 
 
 app = FastAPI(title="GAIA Model API", version="1.0.0", lifespan=lifespan)
@@ -49,6 +53,13 @@ async def health():
         "ok": True,
         "version": "1.0.0",
         "models_loaded": list(registry.loaded_keys()) if registry else [],
+        "env": {
+            "SUPABASE_URL": bool(os.environ.get("SUPABASE_URL")),
+            "SUPABASE_SERVICE_KEY": bool(os.environ.get("SUPABASE_SERVICE_KEY")),
+            "DEEPSEEK_API_KEY": bool(os.environ.get("DEEPSEEK_API_KEY")),
+            "GROQ_API_KEY": bool(os.environ.get("GROQ_API_KEY")),
+            "SUPABASE_JWT_SECRET": bool(os.environ.get("SUPABASE_JWT_SECRET")),
+        },
     }
 
 
@@ -78,12 +89,12 @@ async def diagnose(
 
     user_id = user["sub"]
 
-    if not registry.has(model):
+    if not registry or not registry.has(model):
         raise HTTPException(404, "Unknown model: " + model)
 
     contents = await image.read()
     if len(contents) > 15 * 1024 * 1024:
-        raise HTTPException(413, "Image too large (max 15 MB)")
+        raise HTTPException(413, "Image too large")
 
     try:
         img = Image.open(io.BytesIO(contents)).convert("RGB")

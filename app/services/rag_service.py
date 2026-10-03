@@ -1,21 +1,31 @@
 import os
 import io
 import re
-import requests
 from typing import List, Dict
 import numpy as np
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
-HEADERS = {
-    "apikey": SUPABASE_SERVICE_KEY,
-    "Authorization": "Bearer " + SUPABASE_SERVICE_KEY,
-    "Content-Type": "application/json",
-    "Prefer": "return=representation",
-}
+def _supabase_url() -> str:
+    return os.environ.get("SUPABASE_URL", "https://pxvtvuwlpzwlkdoxjrep.supabase.co")
 
-# ---- Embedding model (lazy-loaded) ----
+
+def _supabase_key() -> str:
+    key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+    if not key:
+        raise RuntimeError("SUPABASE_SERVICE_KEY not set in environment")
+    return key
+
+
+def _headers() -> dict:
+    key = _supabase_key()
+    return {
+        "apikey": key,
+        "Authorization": "Bearer " + key,
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+
+
 _embedder = None
 
 
@@ -27,9 +37,6 @@ def get_embedder():
     return _embedder
 
 
-# ============================================
-# TEXT EXTRACTION
-# ============================================
 def extract_text(contents: bytes, filename: str, mime: str) -> str:
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
 
@@ -39,7 +46,7 @@ def extract_text(contents: bytes, filename: str, mime: str) -> str:
             reader = pypdf.PdfReader(io.BytesIO(contents))
             return "\n\n".join((p.extract_text() or "") for p in reader.pages)
         except Exception as e:
-            return f"[PDF extraction failed: {e}]"
+            return "[PDF extraction failed: " + str(e) + "]"
 
     if ext in ("txt", "md") or "text" in mime:
         try:
@@ -53,34 +60,28 @@ def extract_text(contents: bytes, filename: str, mime: str) -> str:
             doc = docx.Document(io.BytesIO(contents))
             return "\n\n".join(p.text for p in doc.paragraphs)
         except Exception as e:
-            return f"[DOCX extraction failed: {e}]"
+            return "[DOCX extraction failed: " + str(e) + "]"
 
     if ext in ("jpg", "jpeg", "png") or "image" in mime:
-        # OCR not implemented server-side; return placeholder
-        return "[Image uploaded — OCR not yet supported]"
+        return "[Image uploaded - OCR not yet supported]"
 
     return contents.decode("utf-8", errors="ignore")
 
 
-# ============================================
-# CHUNKING (overlapping, sentence-aware)
-# ============================================
 def chunk_text(text: str, target_words: int = 220, overlap: int = 40) -> List[str]:
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return []
 
-    # Split into sentences (rough)
     sentences = re.split(r"(?<=[.!?])\s+", text)
     chunks = []
-    current: List[str] = []
+    current = []
     count = 0
 
     for s in sentences:
         w = len(s.split())
         if count + w > target_words and current:
             chunks.append(" ".join(current))
-            # keep last "overlap" words for context
             tail = " ".join(current).split()[-overlap:]
             current = [" ".join(tail)]
             count = len(tail)
@@ -93,18 +94,16 @@ def chunk_text(text: str, target_words: int = 220, overlap: int = 40) -> List[st
     return [c for c in chunks if len(c.split()) >= 20]
 
 
-# ============================================
-# EMBEDDING + STORAGE
-# ============================================
 def embed(texts: List[str]) -> np.ndarray:
     model = get_embedder()
     return model.encode(texts, normalize_embeddings=True)
 
 
 def insert_document(user_id: str, name: str, file_url: str, mime: str, size: int) -> str:
+    import requests
     r = requests.post(
-        SUPABASE_URL + "/rest/v1/documents",
-        headers=HEADERS,
+        _supabase_url() + "/rest/v1/documents",
+        headers=_headers(),
         json={
             "user_id": user_id,
             "name": name,
@@ -119,6 +118,7 @@ def insert_document(user_id: str, name: str, file_url: str, mime: str, size: int
 
 
 def insert_chunks(user_id: str, document_id: str, chunks: List[str]) -> int:
+    import requests
     if not chunks:
         return 0
     vecs = embed(chunks)
@@ -132,10 +132,9 @@ def insert_chunks(user_id: str, document_id: str, chunks: List[str]) -> int:
             "embedding": vec.tolist(),
         })
 
-    # Bulk insert
     r = requests.post(
-        SUPABASE_URL + "/rest/v1/document_chunks",
-        headers=HEADERS,
+        _supabase_url() + "/rest/v1/document_chunks",
+        headers=_headers(),
         json=rows,
     )
     r.raise_for_status()
@@ -143,21 +142,20 @@ def insert_chunks(user_id: str, document_id: str, chunks: List[str]) -> int:
 
 
 def finalize_document(doc_id: str, chunk_count: int):
+    import requests
     requests.patch(
-        SUPABASE_URL + "/rest/v1/documents?id=eq." + doc_id,
-        headers=HEADERS,
+        _supabase_url() + "/rest/v1/documents?id=eq." + doc_id,
+        headers=_headers(),
         json={"status": "ready", "chunk_count": chunk_count},
     )
 
 
-# ============================================
-# RETRIEVAL (vector similarity via RPC)
-# ============================================
 def retrieve(query: str, user_id: str, top_k: int = 5) -> List[Dict]:
+    import requests
     vec = embed([query])[0].tolist()
     r = requests.post(
-        SUPABASE_URL + "/rest/v1/rpc/match_document_chunks",
-        headers=HEADERS,
+        _supabase_url() + "/rest/v1/rpc/match_document_chunks",
+        headers=_headers(),
         json={
             "query_embedding": vec,
             "match_user_id": user_id,
