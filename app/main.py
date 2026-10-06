@@ -19,6 +19,7 @@ from app.routers.purchases import router as purchases_router
 from app.routers.wallet import router as wallet_router
 from app.routers.wallet_pin import router as wallet_pin_router
 from app.routers.marketplace import router as marketplace_router
+from app.routers.notifications import router as notifications_router
 from app.routers.payment import router as payment_router
 from app.routers.agro_tools import router as agro_router
 
@@ -49,6 +50,7 @@ app.include_router(purchases_router)
 app.include_router(wallet_router)
 app.include_router(wallet_pin_router)
 app.include_router(marketplace_router)
+app.include_router(notifications_router)
 app.include_router(payment_router)
 app.include_router(agro_router)
 
