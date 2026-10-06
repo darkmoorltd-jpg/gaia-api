@@ -307,3 +307,118 @@ async def wallet_webhook_paystack(request: Request):
             s.table('farmer_wallets').update({'balance': new_bal}).eq('user_id', uid).execute()
             s.table('wallet_transactions').update({'status': 'refunded', 'balance_after': new_bal, 'failure_reason': data.get('reason') or et}).eq('reference', ref).execute()
     return {'ok': True}
+
+
+# ============================================================
+# Admin: provision by user_id — looks up BVN/name/phone internally
+# ============================================================
+class ProvisionByUserReq(BaseModel):
+    user_id: str
+
+
+@router.post('/wallet/provision-by-user')
+async def wallet_provision_by_user(req: ProvisionByUserReq, authorization: str = Header(None)):
+    # Admin gate
+    admin = auth_user(authorization)
+    admin_email = (admin.get('email') or '').lower()
+    if admin_email != 'darkmoorltd@gmail.com':
+        raise HTTPException(403, 'admin only')
+
+    uid = req.user_id
+    s = svc()
+
+    # Already provisioned?
+    existing = s.table('farmer_wallets').select('account_number,account_name,bank_name').eq('user_id', uid).limit(1).execute()
+    if existing.data and len(existing.data) > 0 and existing.data[0].get('account_number'):
+        row = existing.data[0]
+        return {'ok': True, 'already_provisioned': True, 'account_number': row['account_number'], 'account_name': row.get('account_name'), 'bank_name': row.get('bank_name')}
+
+    # Fetch verification
+    v = s.table('farmer_verifications').select('full_name,bvn,phone,status').eq('user_id', uid).order('created_at', desc=True).limit(1).execute()
+    if not v.data or len(v.data) == 0:
+        raise HTTPException(400, 'No verification record for this user')
+    verif = v.data[0]
+    bvn = (verif.get('bvn') or '').strip()
+    if not bvn:
+        raise HTTPException(400, 'BVN missing on verification record')
+
+    # Fetch profile for names
+    p = s.table('user_profiles').select('first_name,last_name,phone,email').eq('user_id', uid).limit(1).execute()
+    prof = p.data[0] if p.data and len(p.data) > 0 else {}
+    first_name = (prof.get('first_name') or '').strip() or 'GAIA'
+    last_name = (prof.get('last_name') or '').strip() or 'Farmer'
+    phone = (prof.get('phone') or verif.get('phone') or '').strip()
+    email = (prof.get('email') or '').strip()
+
+    if not email:
+        # fall back to auth email
+        try:
+            au = s.auth.admin.get_user_by_id(uid)
+            email = au.user.email if au and au.user else ''
+        except Exception:
+            pass
+    if not email:
+        raise HTTPException(400, 'Email missing')
+
+    if not phone:
+        phone = '+2340000000000'
+
+    # Create Paystack customer
+    cust = await ps_post('/customer', {
+        'email': email,
+        'first_name': first_name,
+        'last_name': last_name,
+        'phone': phone,
+    })
+    cd = cust.json()
+    if not cd.get('status'):
+        # customer already exists is fine — fetch it
+        if 'already' in (cd.get('message') or '').lower():
+            r2 = await ps_get('/customer?email=' + email)
+            rd = r2.json()
+            if rd.get('status') and rd.get('data'):
+                customer_code = rd['data'][0]['customer_code']
+            else:
+                raise HTTPException(400, cd.get('message') or 'Customer creation failed')
+        else:
+            raise HTTPException(400, cd.get('message') or 'Customer creation failed')
+    else:
+        customer_code = cd['data']['customer_code']
+
+    acct_name = ('GAIA Money - ' + first_name + ' ' + last_name)[:100]
+
+    # Create DVA
+    dva = await ps_post('/dedicated_account', {
+        'customer': customer_code,
+        'preferred_bank': DVA_BANK,
+        'first_name': first_name,
+        'last_name': last_name,
+        'phone': phone,
+        'bvn': bvn,
+        'account_name': acct_name,
+    })
+    dd = dva.json()
+    if not dd.get('status'):
+        raise HTTPException(400, dd.get('message') or 'DVA creation failed')
+
+    account_number = dd['data']['account_number']
+    bank_name = (dd['data'].get('bank') or {}).get('name') or 'Paystack-Titan'
+
+    # Upsert farmer_wallets row
+    s.table('farmer_wallets').upsert({
+        'user_id': uid,
+        'account_number': account_number,
+        'account_name': acct_name,
+        'bank_name': bank_name,
+        'provider_customer_code': customer_code,
+        'provider_dva_id': str(dd['data'].get('id') or ''),
+        'provisioned_at': datetime.utcnow().isoformat(),
+        'updated_at': datetime.utcnow().isoformat(),
+    }, on_conflict='user_id').execute()
+
+    return {
+        'ok': True,
+        'account_number': account_number,
+        'account_name': acct_name,
+        'bank_name': bank_name,
+    }
