@@ -16,6 +16,7 @@ from app.routers.chat import router as chat_router
 from app.routers.rag import router as rag_router
 from app.routers.tts import router as tts_router
 from app.routers.purchases import router as purchases_router
+from app.routers.wallet import router as wallet_router
 from app.routers.payment import router as payment_router
 from app.routers.agro_tools import router as agro_router
 
@@ -43,6 +44,7 @@ app.include_router(chat_router)
 app.include_router(rag_router)
 app.include_router(tts_router)
 app.include_router(purchases_router)
+app.include_router(wallet_router)
 app.include_router(payment_router)
 app.include_router(agro_router)
 
