@@ -100,3 +100,42 @@ async def wallet_verify_pin(req: VerifyPinReq, authorization: str = Header(None)
         raise HTTPException(400, "Incorrect PIN")
 
     return {"ok": True}
+
+
+class ResetPinReq(BaseModel):
+    password: str
+    new_pin: str
+
+
+@router.post("/wallet/reset-pin")
+async def wallet_reset_pin(req: ResetPinReq, authorization: str = Header(None)):
+    user = auth_user(authorization)
+    uid = user["sub"]
+    email = user.get("email") or ""
+
+    if not email:
+        raise HTTPException(400, "Account email missing")
+
+    import httpx
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.post(
+            SUPABASE_URL + "/auth/v1/token?grant_type=password",
+            headers={"apikey": SUPABASE_SERVICE_KEY, "Content-Type": "application/json"},
+            json={"email": email, "password": req.password},
+        )
+    if r.status_code != 200:
+        raise HTTPException(400, "Incorrect password")
+
+    pin = (req.new_pin or "").strip()
+    if len(pin) < 4 or len(pin) > 8 or not pin.isdigit():
+        raise HTTPException(400, "PIN must be 4-8 digits")
+
+    h = hash_pin(uid, pin)
+    s = svc()
+    s.table("farmer_wallets").upsert(
+        {"user_id": uid, "balance": 0, "pin_hash": h,
+         "updated_at": datetime.utcnow().isoformat()},
+        on_conflict="user_id",
+    ).execute()
+
+    return {"ok": True, "reset": True}
