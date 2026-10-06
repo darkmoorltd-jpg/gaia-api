@@ -62,9 +62,10 @@ async def wallet_provision(req: ProvisionReq, authorization: str = Header(None))
     uid = user['sub']
     email = user.get('email') or ''
     s = svc()
-    ww = s.table('farmer_wallets').select('*').eq('user_id', uid).maybeSingle().execute()
-    if ww.data and ww.data.get('account_number'):
-        return {'ok': True, 'already_provisioned': True, 'account_number': ww.data['account_number'], 'bank_name': ww.data.get('bank_name'), 'account_name': ww.data.get('account_name')}
+    ww = s.table('farmer_wallets').select('*').eq('user_id', uid).limit(1).execute()
+    if ww.data and len(ww.data) > 0 and ww.data[0].get('account_number'):
+        row = ww.data[0]
+        return {'ok': True, 'already_provisioned': True, 'account_number': row['account_number'], 'bank_name': row.get('bank_name'), 'account_name': row.get('account_name')}
     cust = await ps_post('/customer', {'email': email, 'first_name': req.first_name, 'last_name': req.last_name, 'phone': req.phone})
     cd = cust.json()
     if not cd.get('status'):
@@ -95,9 +96,21 @@ async def wallet_me(authorization: str = Header(None)):
     user = auth_user(authorization)
     uid = user['sub']
     s = svc()
-    ww = s.table('farmer_wallets').select('*').eq('user_id', uid).maybeSingle().execute()
-    txns = s.table('wallet_transactions').select('*').eq('user_id', uid).order('created_at', desc=True).limit(30).execute()
-    return {'wallet': ww.data or {}, 'transactions': txns.data or []}
+    wallet_row = {}
+    try:
+        ww = s.table('farmer_wallets').select('*').eq('user_id', uid).limit(1).execute()
+        if ww.data and len(ww.data) > 0:
+            wallet_row = ww.data[0]
+    except Exception as e:
+        print('wallet fetch error: ' + str(e)[:200], flush=True)
+    txns_data = []
+    try:
+        txns = s.table('wallet_transactions').select('*').eq('user_id', uid).order('created_at', desc=True).limit(30).execute()
+        if txns.data:
+            txns_data = txns.data
+    except Exception as e:
+        print('txns fetch error: ' + str(e)[:200], flush=True)
+    return {'wallet': wallet_row, 'transactions': txns_data}
 
 
 class DepositInitReq(BaseModel):
@@ -133,12 +146,12 @@ async def wallet_deposit_verify(req: DepositVerifyReq, authorization: str = Head
         raise HTTPException(400, 'Payment not successful')
     paid_naira = float(txn.get('amount', 0)) / 100.0
     s = svc()
-    existing = s.table('wallet_transactions').select('id,status').eq('reference', req.reference).maybeSingle().execute()
-    if existing.data and existing.data.get('status') == 'success':
-        ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).maybeSingle().execute()
-        return {'ok': True, 'already_credited': True, 'balance': float(ww.data.get('balance') or 0) if ww.data else 0}
-    ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).maybeSingle().execute()
-    cur = float(ww.data.get('balance') or 0) if ww.data else 0
+    existing = s.table('wallet_transactions').select('id,status').eq('reference', req.reference).limit(1).execute()
+    if existing.data and len(existing.data) > 0 and existing.data[0].get('status') == 'success':
+        ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).limit(1).execute()
+        return {'ok': True, 'already_credited': True, 'balance': float((ww.data[0] if ww.data else {}).get('balance') or 0)}
+    ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).limit(1).execute()
+    cur = float((ww.data[0] if ww.data else {}).get('balance') or 0)
     new_bal = cur + paid_naira
     s.table('farmer_wallets').upsert({'user_id': uid, 'balance': new_bal, 'updated_at': datetime.utcnow().isoformat()}, on_conflict='user_id').execute()
     s.table('wallet_transactions').update({'status': 'success', 'balance_after': new_bal, 'provider_ref': str(txn.get('id') or ''), 'updated_at': datetime.utcnow().isoformat()}).eq('reference', req.reference).execute()
@@ -161,23 +174,23 @@ async def wallet_send_user(req: SendUserReq, authorization: str = Header(None)):
     ident = req.identifier.strip().lower()
     rec = None
     if '@' in ident:
-        rr = s.table('user_profiles').select('user_id,first_name,last_name').eq('email', ident).maybeSingle().execute()
-        rec = rr.data
+        rr = s.table('user_profiles').select('user_id,first_name,last_name').eq('email', ident).limit(1).execute()
+        rec = rr.data[0] if rr.data else None
     else:
-        rr = s.table('user_profiles').select('user_id,first_name,last_name').eq('phone', ident).maybeSingle().execute()
-        rec = rr.data
+        rr = s.table('user_profiles').select('user_id,first_name,last_name').eq('phone', ident).limit(1).execute()
+        rec = rr.data[0] if rr.data else None
     if not rec:
         raise HTTPException(404, 'No GAIA user found')
     rid = rec['user_id']
     if rid == uid:
         raise HTTPException(400, 'Cannot send to yourself')
-    ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).maybeSingle().execute()
-    sender_bal = float(ww.data.get('balance') or 0) if ww.data else 0
+    ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).limit(1).execute()
+    sender_bal = float((ww.data[0] if ww.data else {}).get('balance') or 0)
     if sender_bal < req.amount_naira:
         raise HTTPException(400, 'Insufficient balance')
     s.table('farmer_wallets').upsert({'user_id': rid, 'balance': 0}, on_conflict='user_id').execute()
-    rw = s.table('farmer_wallets').select('balance').eq('user_id', rid).maybeSingle().execute()
-    rec_bal = float(rw.data.get('balance') or 0) if rw.data else 0
+    rw = s.table('farmer_wallets').select('balance').eq('user_id', rid).limit(1).execute()
+    rec_bal = float((rw.data[0] if rw.data else {}).get('balance') or 0)
     new_sender = sender_bal - req.amount_naira
     new_rec = rec_bal + req.amount_naira
     s.table('farmer_wallets').update({'balance': new_sender}).eq('user_id', uid).execute()
@@ -233,8 +246,8 @@ async def wallet_withdraw(req: WithdrawReq, authorization: str = Header(None)):
     s = svc()
     if req.amount_naira < 500:
         raise HTTPException(400, 'Minimum N500')
-    ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).maybeSingle().execute()
-    bal = float(ww.data.get('balance') or 0) if ww.data else 0
+    ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).limit(1).execute()
+    bal = float((ww.data[0] if ww.data else {}).get('balance') or 0)
     if bal < req.amount_naira:
         raise HTTPException(400, 'Insufficient balance')
     rec = await ps_post('/transferrecipient', {'type': 'nuban', 'name': req.account_name, 'account_number': req.account_number, 'bank_code': req.bank_code, 'currency': 'NGN'})
@@ -271,26 +284,26 @@ async def wallet_webhook_paystack(request: Request):
         ref = data.get('reference') or ''
         cust = (data.get('customer') or {}).get('customer_code') or ''
         if cust:
-            ww = s.table('farmer_wallets').select('user_id,balance').eq('provider_customer_code', cust).maybeSingle().execute()
-            if ww.data:
-                uid = ww.data['user_id']
+            ww = s.table('farmer_wallets').select('user_id,balance').eq('provider_customer_code', cust).limit(1).execute()
+            if ww.data and len(ww.data) > 0:
+                uid = ww.data[0]['user_id']
                 amt = float(data.get('amount', 0)) / 100.0
-                new_bal = float(ww.data.get('balance') or 0) + amt
+                new_bal = float(ww.data[0].get('balance') or 0) + amt
                 s.table('farmer_wallets').update({'balance': new_bal}).eq('user_id', uid).execute()
-                ex = s.table('wallet_transactions').select('id').eq('reference', ref).maybeSingle().execute()
-                if not ex.data:
+                ex = s.table('wallet_transactions').select('id').eq('reference', ref).limit(1).execute()
+                if not ex.data or len(ex.data) == 0:
                     s.table('wallet_transactions').insert({'user_id': uid, 'type': 'deposit', 'direction': 'in', 'amount': amt, 'balance_after': new_bal, 'status': 'success', 'reference': ref, 'provider_ref': str(data.get('id') or ''), 'meta': {'source': 'dva'}}).execute()
     if et == 'transfer.success':
         ref = data.get('reference') or ''
         s.table('wallet_transactions').update({'status': 'success', 'updated_at': datetime.utcnow().isoformat()}).eq('reference', ref).execute()
     if et == 'transfer.failed' or et == 'transfer.reversed':
         ref = data.get('reference') or ''
-        tx = s.table('wallet_transactions').select('user_id,amount,status').eq('reference', ref).maybeSingle().execute()
-        if tx.data and tx.data.get('status') == 'processing':
-            uid = tx.data['user_id']
-            amt = float(tx.data['amount'])
-            ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).maybeSingle().execute()
-            new_bal = (float(ww.data.get('balance') or 0) if ww.data else 0) + amt
+        tx = s.table('wallet_transactions').select('user_id,amount,status').eq('reference', ref).limit(1).execute()
+        if tx.data and len(tx.data) > 0 and tx.data[0].get('status') == 'processing':
+            uid = tx.data[0]['user_id']
+            amt = float(tx.data[0]['amount'])
+            ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).limit(1).execute()
+            new_bal = (float((ww.data[0] if ww.data else {}).get('balance') or 0)) + amt
             s.table('farmer_wallets').update({'balance': new_bal}).eq('user_id', uid).execute()
             s.table('wallet_transactions').update({'status': 'refunded', 'balance_after': new_bal, 'failure_reason': data.get('reason') or et}).eq('reference', ref).execute()
     return {'ok': True}
