@@ -162,12 +162,14 @@ class SendUserReq(BaseModel):
     identifier: str
     amount_naira: float
     note: Optional[str] = None
+    pin: str = ""
 
 
 @router.post('/wallet/send/user')
 async def wallet_send_user(req: SendUserReq, authorization: str = Header(None)):
     user = auth_user(authorization)
     uid = user['sub']
+    _check_pin(uid, req.pin)
     s = svc()
     if req.amount_naira < 10:
         raise HTTPException(400, 'Minimum N10')
@@ -237,12 +239,14 @@ class WithdrawReq(BaseModel):
     bank_code: str
     account_name: str
     amount_naira: float
+    pin: str = ""
 
 
 @router.post('/wallet/withdraw')
 async def wallet_withdraw(req: WithdrawReq, authorization: str = Header(None)):
     user = auth_user(authorization)
     uid = user['sub']
+    _check_pin(uid, req.pin)
     s = svc()
     if req.amount_naira < 500:
         raise HTTPException(400, 'Minimum N500')
@@ -426,35 +430,9 @@ async def wallet_provision_by_user(req: ProvisionByUserReq, authorization: str =
 
 
 # ============================================================
-# PIN helpers (server-side verify)
+# PIN helpers — delegate to wallet_pin.py (single source of truth)
 # ============================================================
-import hashlib
-
-
-def _hash_pin(pin: str, user_id: str) -> str:
-    return hashlib.sha256((pin + user_id).encode()).hexdigest()
-
-
-def _check_pin(uid: str, pin: str) -> bool:
-    s = svc()
-    r = s.table('user_profiles').select('wallet_pin_hash,wallet_pin_locked_until').eq('user_id', uid).limit(1).execute()
-    if not r.data or len(r.data) == 0:
-        raise HTTPException(400, 'Set your transfer PIN first in Wallet')
-    row = r.data[0]
-    locked = row.get('wallet_pin_locked_until')
-    if locked:
-        try:
-            from datetime import datetime as _dt
-            if _dt.fromisoformat(locked.replace('Z', '+00:00')) > _dt.utcnow():
-                raise HTTPException(423, 'PIN locked. Try again later.')
-        except HTTPException:
-            raise
-        except Exception:
-            pass
-    if row.get('wallet_pin_hash') != _hash_pin(pin, uid):
-        s.table('user_profiles').update({'wallet_pin_attempts': (row.get('wallet_pin_attempts') or 0) + 1}).eq('user_id', uid).execute()
-        raise HTTPException(403, 'Incorrect PIN')
-    return True
+from app.routers.wallet_pin import check_pin as _check_pin
 
 
 class BuyScansReq(BaseModel):
@@ -521,18 +499,6 @@ async def wallet_buy_scans(req: BuyScansReq, authorization: str = Header(None)):
     }
 
 
-class PinReq(BaseModel):
-    pin: str
-
-
-@router.post('/wallet/verify-pin')
-async def wallet_verify_pin(req: PinReq, authorization: str = Header(None)):
-    user = auth_user(authorization)
-    try:
-        _check_pin(user['sub'], req.pin)
-        return {'ok': True}
-    except HTTPException:
-        raise
 
 
 @router.get('/wallet/statement')

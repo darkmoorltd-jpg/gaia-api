@@ -139,3 +139,25 @@ async def wallet_reset_pin(req: ResetPinReq, authorization: str = Header(None)):
     ).execute()
 
     return {"ok": True, "reset": True}
+
+
+
+# ============================================================
+# Public alias for wallet.py's endpoints to reuse
+# ============================================================
+def check_pin(uid: str, pin: str) -> bool:
+    """Verify the PIN for a user. Raises HTTPException on failure."""
+    if not pin:
+        raise HTTPException(400, "PIN required")
+
+    s = svc()
+    r = s.table("farmer_wallets").select("pin_hash").eq("user_id", uid).limit(1).execute()
+    if not r.data or len(r.data) == 0 or not r.data[0].get("pin_hash"):
+        raise HTTPException(400, "Set your transfer PIN first in Wallet")
+    stored = r.data[0]["pin_hash"]
+
+    expected = hash_pin(uid, pin)
+    if not hmac.compare_digest(stored, expected):
+        raise HTTPException(403, "Incorrect PIN")
+
+    return True
