@@ -422,3 +422,151 @@ async def wallet_provision_by_user(req: ProvisionByUserReq, authorization: str =
         'account_name': acct_name,
         'bank_name': bank_name,
     }
+
+
+
+# ============================================================
+# PIN helpers (server-side verify)
+# ============================================================
+import hashlib
+
+
+def _hash_pin(pin: str, user_id: str) -> str:
+    return hashlib.sha256((pin + user_id).encode()).hexdigest()
+
+
+def _check_pin(uid: str, pin: str) -> bool:
+    s = svc()
+    r = s.table('user_profiles').select('wallet_pin_hash,wallet_pin_locked_until').eq('user_id', uid).limit(1).execute()
+    if not r.data or len(r.data) == 0:
+        raise HTTPException(400, 'Set your transfer PIN first in Wallet')
+    row = r.data[0]
+    locked = row.get('wallet_pin_locked_until')
+    if locked:
+        try:
+            from datetime import datetime as _dt
+            if _dt.fromisoformat(locked.replace('Z', '+00:00')) > _dt.utcnow():
+                raise HTTPException(423, 'PIN locked. Try again later.')
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+    if row.get('wallet_pin_hash') != _hash_pin(pin, uid):
+        s.table('user_profiles').update({'wallet_pin_attempts': (row.get('wallet_pin_attempts') or 0) + 1}).eq('user_id', uid).execute()
+        raise HTTPException(403, 'Incorrect PIN')
+    return True
+
+
+class BuyScansReq(BaseModel):
+    plan: str
+    pin: str
+
+
+@router.post('/wallet/buy-scans')
+async def wallet_buy_scans(req: BuyScansReq, authorization: str = Header(None)):
+    user = auth_user(authorization)
+    uid = user['sub']
+    _check_pin(uid, req.pin)
+
+    # Local plan table (server side source of truth)
+    PLAN_MAP = {
+        'starter':    {'name': 'Starter',    'scans': 150,  'amount_naira': 3000},
+        'pro':        {'name': 'Pro',        'scans': 300,  'amount_naira': 5000},
+        'business':   {'name': 'Business',   'scans': 1000, 'amount_naira': 10000},
+        'enterprise': {'name': 'Enterprise', 'scans': 5000, 'amount_naira': 20000},
+    }
+    plan = PLAN_MAP.get(req.plan)
+    if not plan:
+        raise HTTPException(400, 'Unknown plan')
+    amt = float(plan['amount_naira'])
+
+    s = svc()
+    w = s.table('farmer_wallets').select('balance').eq('user_id', uid).limit(1).execute()
+    bal = float((w.data[0] if w.data else {}).get('balance') or 0)
+    if bal < amt:
+        raise HTTPException(400, 'Insufficient wallet balance')
+
+    new_bal = bal - amt
+    s.table('farmer_wallets').update({'balance': new_bal}).eq('user_id', uid).execute()
+
+    # Credit scans
+    s.table('user_scans').upsert(
+        {'user_id': uid, 'scans_remaining': 30, 'plan': 'free'},
+        on_conflict='user_id'
+    ).execute()
+    sc = s.table('user_scans').select('scans_remaining').eq('user_id', uid).limit(1).execute()
+    cur = int((sc.data[0] if sc.data else {}).get('scans_remaining') or 0)
+    new_scans = cur + plan['scans']
+    s.table('user_scans').update({'scans_remaining': new_scans, 'plan': req.plan}).eq('user_id', uid).execute()
+
+    ref = 'GAIA_WSCAN_' + uuid.uuid4().hex[:12]
+    s.table('wallet_transactions').insert({
+        'user_id': uid,
+        'type': 'scan_purchase',
+        'direction': 'out',
+        'amount': amt,
+        'balance_after': new_bal,
+        'status': 'success',
+        'reference': ref,
+        'counterparty_name': plan['name'] + ' (' + str(plan['scans']) + ' scans)',
+        'meta': {'plan': req.plan, 'scans_added': plan['scans']},
+    }).execute()
+
+    return {
+        'ok': True,
+        'balance': new_bal,
+        'scans_added': plan['scans'],
+        'scans_remaining': new_scans,
+        'reference': ref,
+    }
+
+
+class PinReq(BaseModel):
+    pin: str
+
+
+@router.post('/wallet/verify-pin')
+async def wallet_verify_pin(req: PinReq, authorization: str = Header(None)):
+    user = auth_user(authorization)
+    try:
+        _check_pin(user['sub'], req.pin)
+        return {'ok': True}
+    except HTTPException:
+        raise
+
+
+@router.get('/wallet/statement')
+async def wallet_statement(authorization: str = Header(None), limit: int = 100):
+    user = auth_user(authorization)
+    uid = user['sub']
+    s = svc()
+    rows = s.table('wallet_transactions').select('*').eq('user_id', uid).order('created_at', desc=True).limit(limit).execute()
+    return {'transactions': rows.data or []}
+
+
+@router.get('/wallet/receipt/{reference}')
+async def wallet_receipt(reference: str, authorization: str = Header(None)):
+    user = auth_user(authorization)
+    uid = user['sub']
+    s = svc()
+    r = s.table('wallet_transactions').select('*').eq('reference', reference).eq('user_id', uid).limit(1).execute()
+    if not r.data or len(r.data) == 0:
+        raise HTTPException(404, 'Receipt not found')
+    tx = r.data[0]
+    w = s.table('farmer_wallets').select('balance,account_number').eq('user_id', uid).limit(1).execute()
+    wrow = w.data[0] if w.data else {}
+    return {
+        'receipt_number': tx.get('receipt_number'),
+        'reference': tx.get('reference'),
+        'type': tx.get('type'),
+        'direction': tx.get('direction'),
+        'amount': tx.get('amount'),
+        'status': tx.get('status'),
+        'created_at': tx.get('created_at'),
+        'counterparty_name': tx.get('counterparty_name'),
+        'counterparty_acct': tx.get('counterparty_acct'),
+        'meta': tx.get('meta') or {},
+        'current_balance': wrow.get('balance'),
+        'account_number': wrow.get('account_number'),
+        'user_email': user.get('email'),
+    }
