@@ -54,8 +54,20 @@ async def marketplace_pay(req: PayReq, authorization: str = Header(None)):
     for o in orders:
         if o.get("buyer_id") != uid:
             raise HTTPException(403, "Not your order")
-        if o.get("status") != "pending":
-            raise HTTPException(400, "Order already paid or cancelled")
+
+    # Idempotency: if any order in this batch is already paid, return the previous result
+    already_paid = [o for o in orders if o.get("status") == "paid"]
+    if already_paid:
+        return {
+            "ok": True,
+            "idempotent": True,
+            "paid_orders": len(already_paid),
+            "message": "This payment was already processed",
+        }
+
+    for o in orders:
+        if o.get("status") not in ("pending",):
+            raise HTTPException(400, "Order not payable")
 
     total = 0.0
     for o in orders:
@@ -457,11 +469,16 @@ async def marketplace_resolve_dispute(req: ResolveDisputeReq, authorization: str
                 }).execute()
                 released_to_seller = seller_net_share
 
-        s.table("marketplace_escrow").update({
-            "status": "released" if req.action == "release" else "refunded",
-            "released_at" if req.action == "release" else "refunded_at": ts,
+        final_status = "released" if req.action in ("release", "split") else "refunded"
+        update_payload = {
+            "status": final_status,
             "release_ref": "GAIA_DISP_" + req.dispute_id[:8],
-        }).eq("id", escrow["id"]).execute()
+        }
+        if final_status == "released":
+            update_payload["released_at"] = ts
+        else:
+            update_payload["refunded_at"] = ts
+        s.table("marketplace_escrow").update(update_payload).eq("id", escrow["id"]).execute()
 
     s.table("marketplace_disputes").update({
         "status": "resolved",
