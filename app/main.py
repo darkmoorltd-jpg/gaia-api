@@ -12,6 +12,7 @@ from app.services.model_registry import ModelRegistry
 from app.services.scan_service import deduct_scan
 from app.schemas.diagnosis import DiagnosisResponse
 from app.routers.voice import router as voice_router
+from app.routers.farming_calendar import router as farming_calendar_router
 from app.routers.chat import router as chat_router
 from app.routers.rag import router as rag_router
 from app.routers.tts import router as tts_router
@@ -44,6 +45,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="GAIA Model API", version="1.0.0", lifespan=lifespan)
 
 app.include_router(voice_router)
+app.include_router(farming_calendar_router)
 app.include_router(chat_router)
 app.include_router(rag_router)
 app.include_router(tts_router)
