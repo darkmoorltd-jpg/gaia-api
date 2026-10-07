@@ -20,6 +20,7 @@ from app.routers.purchases import router as purchases_router
 from app.routers.wallet import router as wallet_router
 from app.routers.wallet_pin import router as wallet_pin_router
 from app.routers.wallet_pdf import router as wallet_pdf_router
+from app.routers.rosca_pdf import router as rosca_pdf_router
 from app.routers.marketplace import router as marketplace_router
 from app.routers.badge import router as badge_router
 from app.routers.notifications import router as notifications_router
@@ -53,6 +54,7 @@ app.include_router(tts_router)
 app.include_router(purchases_router)
 app.include_router(wallet_router)
 app.include_router(wallet_pdf_router)
+app.include_router(rosca_pdf_router)
 app.include_router(wallet_pin_router)
 app.include_router(marketplace_router)
 app.include_router(badge_router)
