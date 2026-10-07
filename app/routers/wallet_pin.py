@@ -1,9 +1,9 @@
 # app/routers/wallet_pin.py
-# Wallet PIN — set and verify, hashed consistently
+# Wallet PIN — set and verify. NEVER touches balance.
 import os
 import hashlib
 import hmac
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from app.services.auth import verify_supabase_token
@@ -31,8 +31,6 @@ def auth_user(authorization):
 
 
 def hash_pin(user_id, pin):
-    # Salted + peppered sha256 — good for a 4-6 digit wallet PIN
-    # that is already rate-limited by the verify endpoint.
     raw = (user_id + ":" + pin + ":" + PIN_PEPPER).encode()
     return hashlib.sha256(raw).hexdigest()
 
@@ -53,18 +51,26 @@ async def wallet_set_pin(req: SetPinReq, authorization: str = Header(None)):
         raise HTTPException(400, "PIN must contain only digits")
 
     h = hash_pin(uid, pin)
-
     s = svc()
-    s.table("farmer_wallets").upsert(
-        {"user_id": uid, "balance": 0, "pin_hash": h, "updated_at": datetime.utcnow().isoformat()},
-        on_conflict="user_id",
-    ).execute()
+
+    # Insert-only if missing. NEVER overwrite balance.
+    existing = s.table("farmer_wallets").select("user_id").eq("user_id", uid).limit(1).execute()
+    if not existing.data:
+        s.table("farmer_wallets").insert({
+            "user_id": uid,
+            "balance": 0,
+            "pin_hash": h,
+            "updated_at": datetime.utcnow().isoformat(),
+        }).execute()
+    else:
+        s.table("farmer_wallets").update({
+            "pin_hash": h,
+            "failed_pin_attempts": 0,
+            "pin_locked_until": None,
+            "updated_at": datetime.utcnow().isoformat(),
+        }).eq("user_id", uid).execute()
 
     return {"ok": True}
-
-
-class HasPinReq(BaseModel):
-    pass
 
 
 @router.get("/wallet/has-pin")
@@ -85,20 +91,7 @@ class VerifyPinReq(BaseModel):
 async def wallet_verify_pin(req: VerifyPinReq, authorization: str = Header(None)):
     user = auth_user(authorization)
     uid = user["sub"]
-    pin = (req.pin or "").strip()
-    if not pin:
-        raise HTTPException(400, "PIN required")
-
-    s = svc()
-    r = s.table("farmer_wallets").select("pin_hash").eq("user_id", uid).limit(1).execute()
-    if not r.data or len(r.data) == 0 or not r.data[0].get("pin_hash"):
-        raise HTTPException(400, "No PIN set")
-    stored = r.data[0]["pin_hash"]
-
-    expected = hash_pin(uid, pin)
-    if not hmac.compare_digest(stored, expected):
-        raise HTTPException(400, "Incorrect PIN")
-
+    _check_pin(uid, (req.pin or "").strip())
     return {"ok": True}
 
 
@@ -132,32 +125,62 @@ async def wallet_reset_pin(req: ResetPinReq, authorization: str = Header(None)):
 
     h = hash_pin(uid, pin)
     s = svc()
-    s.table("farmer_wallets").upsert(
-        {"user_id": uid, "balance": 0, "pin_hash": h,
-         "updated_at": datetime.utcnow().isoformat()},
-        on_conflict="user_id",
-    ).execute()
+    s.table("farmer_wallets").update({
+        "pin_hash": h,
+        "failed_pin_attempts": 0,
+        "pin_locked_until": None,
+        "updated_at": datetime.utcnow().isoformat(),
+    }).eq("user_id", uid).execute()
 
     return {"ok": True, "reset": True}
 
 
-
-# ============================================================
-# Public alias for wallet.py's endpoints to reuse
-# ============================================================
 def check_pin(uid: str, pin: str) -> bool:
-    """Verify the PIN for a user. Raises HTTPException on failure."""
+    """Verify the PIN with lockout. Raises HTTPException on failure."""
     if not pin:
         raise HTTPException(400, "PIN required")
 
     s = svc()
-    r = s.table("farmer_wallets").select("pin_hash").eq("user_id", uid).limit(1).execute()
+    r = s.table("farmer_wallets").select(
+        "pin_hash,failed_pin_attempts,pin_locked_until"
+    ).eq("user_id", uid).limit(1).execute()
+
     if not r.data or len(r.data) == 0 or not r.data[0].get("pin_hash"):
         raise HTTPException(400, "Set your transfer PIN first in Wallet")
-    stored = r.data[0]["pin_hash"]
 
+    row = r.data[0]
+
+    # Locked?
+    locked = row.get("pin_locked_until")
+    if locked:
+        try:
+            locked_dt = datetime.fromisoformat(str(locked).replace("Z", "+00:00"))
+            if locked_dt.tzinfo is not None:
+                now = datetime.now(locked_dt.tzinfo)
+            else:
+                now = datetime.utcnow()
+            if locked_dt > now:
+                remaining = int((locked_dt - now).total_seconds() // 60) + 1
+                raise HTTPException(429, "PIN locked. Try again in " + str(remaining) + " minutes.")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    stored = row["pin_hash"]
     expected = hash_pin(uid, pin)
     if not hmac.compare_digest(stored, expected):
+        # Record failure atomically
+        try:
+            s.rpc("wallet_record_pin_failure", {"p_user_id": uid}).execute()
+        except Exception:
+            pass
         raise HTTPException(403, "Incorrect PIN")
+
+    # Success — clear failures
+    try:
+        s.rpc("wallet_clear_pin_failures", {"p_user_id": uid}).execute()
+    except Exception:
+        pass
 
     return True

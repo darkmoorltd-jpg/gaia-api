@@ -35,6 +35,20 @@ def auth_user(authorization):
         raise HTTPException(401, 'Invalid token: ' + str(e))
 
 
+def _require_kyc(uid: str):
+    """Raise 403 if user is not verified (KYC approved)."""
+    s = svc()
+    try:
+        r = s.rpc('user_is_verified', {'p_user_id': uid}).execute()
+        if not (r.data is True or r.data == True):
+            raise HTTPException(403, 'Verify your identity in Profile first')
+    except HTTPException:
+        raise
+    except Exception:
+        # If RPC missing, fail open (admin only path)
+        pass
+
+
 async def ps_post(path, body):
     async with httpx.AsyncClient(timeout=30) as c:
         return await c.post(
@@ -150,10 +164,10 @@ async def wallet_deposit_verify(req: DepositVerifyReq, authorization: str = Head
     if existing.data and len(existing.data) > 0 and existing.data[0].get('status') == 'success':
         ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).limit(1).execute()
         return {'ok': True, 'already_credited': True, 'balance': float((ww.data[0] if ww.data else {}).get('balance') or 0)}
-    ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).limit(1).execute()
-    cur = float((ww.data[0] if ww.data else {}).get('balance') or 0)
-    new_bal = cur + paid_naira
-    s.table('farmer_wallets').upsert({'user_id': uid, 'balance': new_bal, 'updated_at': datetime.utcnow().isoformat()}, on_conflict='user_id').execute()
+    # Ensure row exists, then atomic credit
+    s.table('farmer_wallets').upsert({'user_id': uid, 'balance': 0}, on_conflict='user_id').execute()
+    credit_res = s.rpc('wallet_credit', {'p_user_id': uid, 'p_amount': paid_naira}).execute()
+    new_bal = credit_res.data
     s.table('wallet_transactions').update({'status': 'success', 'balance_after': new_bal, 'provider_ref': str(txn.get('id') or ''), 'updated_at': datetime.utcnow().isoformat()}).eq('reference', req.reference).execute()
     return {'ok': True, 'amount': paid_naira, 'balance': new_bal}
 
@@ -169,6 +183,7 @@ class SendUserReq(BaseModel):
 async def wallet_send_user(req: SendUserReq, authorization: str = Header(None)):
     user = auth_user(authorization)
     uid = user['sub']
+    _require_kyc(uid)
     _check_pin(uid, req.pin)
     s = svc()
     if req.amount_naira < 10:
@@ -186,17 +201,25 @@ async def wallet_send_user(req: SendUserReq, authorization: str = Header(None)):
     rid = rec['user_id']
     if rid == uid:
         raise HTTPException(400, 'Cannot send to yourself')
-    ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).limit(1).execute()
-    sender_bal = float((ww.data[0] if ww.data else {}).get('balance') or 0)
-    if sender_bal < req.amount_naira:
-        raise HTTPException(400, 'Insufficient balance')
+    # Ensure recipient row exists so credit doesn't fail on missing row
     s.table('farmer_wallets').upsert({'user_id': rid, 'balance': 0}, on_conflict='user_id').execute()
-    rw = s.table('farmer_wallets').select('balance').eq('user_id', rid).limit(1).execute()
-    rec_bal = float((rw.data[0] if rw.data else {}).get('balance') or 0)
-    new_sender = sender_bal - req.amount_naira
-    new_rec = rec_bal + req.amount_naira
-    s.table('farmer_wallets').update({'balance': new_sender}).eq('user_id', uid).execute()
-    s.table('farmer_wallets').update({'balance': new_rec}).eq('user_id', rid).execute()
+
+    # Atomic debit (checks balance + daily limit in one statement)
+    debit_res = s.rpc('wallet_debit', {
+        'p_user_id': uid,
+        'p_amount': req.amount_naira,
+        'p_daily_limit': 50000,
+    }).execute()
+    new_sender = debit_res.data
+    if new_sender is None:
+        raise HTTPException(400, 'Insufficient balance or daily limit reached')
+
+    # Atomic credit to recipient
+    credit_res = s.rpc('wallet_credit', {
+        'p_user_id': rid,
+        'p_amount': req.amount_naira,
+    }).execute()
+    new_rec = credit_res.data if credit_res.data is not None else 0
     out_ref = 'GAIA_P2P_OUT_' + uuid.uuid4().hex[:12]
     in_ref = 'GAIA_P2P_IN_' + uuid.uuid4().hex[:12]
     rec_name = ((rec.get('first_name') or '') + ' ' + (rec.get('last_name') or '')).strip() or ident
@@ -246,27 +269,35 @@ class WithdrawReq(BaseModel):
 async def wallet_withdraw(req: WithdrawReq, authorization: str = Header(None)):
     user = auth_user(authorization)
     uid = user['sub']
+    _require_kyc(uid)
     _check_pin(uid, req.pin)
     s = svc()
     if req.amount_naira < 500:
         raise HTTPException(400, 'Minimum N500')
-    ww = s.table('farmer_wallets').select('balance').eq('user_id', uid).limit(1).execute()
-    bal = float((ww.data[0] if ww.data else {}).get('balance') or 0)
-    if bal < req.amount_naira:
-        raise HTTPException(400, 'Insufficient balance')
+    # Atomic debit BEFORE calling Paystack. Refund if transfer fails.
+    debit_res = s.rpc('wallet_debit', {
+        'p_user_id': uid,
+        'p_amount': req.amount_naira,
+        'p_daily_limit': 50000,
+    }).execute()
+    new_bal = debit_res.data
+    if new_bal is None:
+        raise HTTPException(400, 'Insufficient balance or daily limit reached')
+
     rec = await ps_post('/transferrecipient', {'type': 'nuban', 'name': req.account_name, 'account_number': req.account_number, 'bank_code': req.bank_code, 'currency': 'NGN'})
     rd = rec.json()
     if not rd.get('status'):
+        # Refund
+        s.rpc('wallet_credit', {'p_user_id': uid, 'p_amount': req.amount_naira}).execute()
         raise HTTPException(400, rd.get('message') or 'Recipient failed')
     recipient_code = rd['data']['recipient_code']
     ref = 'GAIA_WD_' + uuid.uuid4().hex[:12]
-    new_bal = bal - req.amount_naira
-    s.table('farmer_wallets').update({'balance': new_bal}).eq('user_id', uid).execute()
     s.table('wallet_transactions').insert({'user_id': uid, 'type': 'withdrawal', 'direction': 'out', 'amount': req.amount_naira, 'balance_after': new_bal, 'status': 'processing', 'reference': ref, 'counterparty_acct': req.account_number, 'counterparty_name': req.account_name}).execute()
     xfer = await ps_post('/transfer', {'source': 'balance', 'amount': int(round(req.amount_naira * 100)), 'recipient': recipient_code, 'reason': 'GAIA wallet withdrawal', 'reference': ref})
     xd = xfer.json()
     if not xd.get('status'):
-        s.table('farmer_wallets').update({'balance': bal}).eq('user_id', uid).execute()
+        # Refund via atomic credit
+        s.rpc('wallet_credit', {'p_user_id': uid, 'p_amount': req.amount_naira}).execute()
         s.table('wallet_transactions').update({'status': 'failed', 'failure_reason': xd.get('message') or 'Transfer failed'}).eq('reference', ref).execute()
         raise HTTPException(400, xd.get('message') or 'Transfer failed')
     s.table('wallet_transactions').update({'provider_ref': xd['data'].get('transfer_code') or ''}).eq('reference', ref).execute()
@@ -292,8 +323,9 @@ async def wallet_webhook_paystack(request: Request):
             if ww.data and len(ww.data) > 0:
                 uid = ww.data[0]['user_id']
                 amt = float(data.get('amount', 0)) / 100.0
-                new_bal = float(ww.data[0].get('balance') or 0) + amt
-                s.table('farmer_wallets').update({'balance': new_bal}).eq('user_id', uid).execute()
+                s.table('farmer_wallets').upsert({'user_id': uid, 'balance': 0}, on_conflict='user_id').execute()
+                credit_res = s.rpc('wallet_credit', {'p_user_id': uid, 'p_amount': amt}).execute()
+                new_bal = credit_res.data
                 ex = s.table('wallet_transactions').select('id').eq('reference', ref).limit(1).execute()
                 if not ex.data or len(ex.data) == 0:
                     s.table('wallet_transactions').insert({'user_id': uid, 'type': 'deposit', 'direction': 'in', 'amount': amt, 'balance_after': new_bal, 'status': 'success', 'reference': ref, 'provider_ref': str(data.get('id') or ''), 'meta': {'source': 'dva'}}).execute()
@@ -459,13 +491,14 @@ async def wallet_buy_scans(req: BuyScansReq, authorization: str = Header(None)):
     amt = float(plan['amount_naira'])
 
     s = svc()
-    w = s.table('farmer_wallets').select('balance').eq('user_id', uid).limit(1).execute()
-    bal = float((w.data[0] if w.data else {}).get('balance') or 0)
-    if bal < amt:
+    debit_res = s.rpc('wallet_debit', {
+        'p_user_id': uid,
+        'p_amount': amt,
+        'p_daily_limit': 1000000,
+    }).execute()
+    new_bal = debit_res.data
+    if new_bal is None:
         raise HTTPException(400, 'Insufficient wallet balance')
-
-    new_bal = bal - amt
-    s.table('farmer_wallets').update({'balance': new_bal}).eq('user_id', uid).execute()
 
     # Credit scans
     s.table('user_scans').upsert(
