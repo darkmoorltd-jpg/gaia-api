@@ -167,3 +167,178 @@ async def harvest_decision(req: HarvestRequest, authorization: str = Header(None
         decision = text[:120]
 
     return {"ok": True, "decision": decision, "reason": reason, "action": action, "language": req.language}
+
+
+# ============================================================
+# LIVING SEASON — live value, forecast, weather, market price
+# ============================================================
+
+from datetime import datetime, timedelta
+
+
+class LiveValueRequest(BaseModel):
+    season_id: str
+    crop: str
+    stage: str
+    days_since_planting: int
+    days_to_harvest: int
+    plot_hectares: Optional[float] = None
+    state: Optional[str] = None
+    recent_events: Optional[list] = []
+    total_cost_naira: Optional[float] = 0
+    language: Optional[str] = "en"
+
+
+CROP_BASE_YIELD_KG_PER_HA = {
+    "maize": 2500, "rice": 3500, "sorghum": 1500, "millet": 1200,
+    "cowpea (beans)": 1000, "beans": 1000, "soybean": 1500,
+    "groundnut": 1200, "tomato": 25000, "pepper": 8000,
+    "onion": 20000, "cabbage": 30000, "cassava": 15000, "yam": 12000,
+}
+
+
+@router.post("/season/live-value")
+async def live_value(req: LiveValueRequest, authorization: str = Header(None)):
+    """
+    Return the live value of the standing crop + health + forecast.
+    Uses Groq for a farmer-facing narrative; math is deterministic.
+    """
+    if not GROQ_KEY:
+        raise HTTPException(500, "GROQ_API_KEY not configured")
+
+    lang = LANG_NAMES.get((req.language or "en").split("-")[0], "English")
+
+    crop_key = req.crop.lower()
+    base = CROP_BASE_YIELD_KG_PER_HA.get(crop_key, 2000)
+    ha = req.plot_hectares or 1.0
+
+    # Disease / pest penalties from recent events
+    disease_hits = sum(1 for e in (req.recent_events or [])
+                       if e.get("kind") in ("disease", "pest"))
+    spray_hits = sum(1 for e in (req.recent_events or [])
+                     if e.get("kind") == "sprayed")
+    net_pressure = max(0, disease_hits - spray_hits)
+
+    # Stage progress from days
+    total_days = max(1, req.days_since_planting + max(0, req.days_to_harvest))
+    stage_frac = min(1.0, req.days_since_planting / total_days)
+
+    # Projected yield: base * ha * progress adjustments
+    stage_multiplier = min(1.0, 0.35 + 0.65 * stage_frac)  # early = smaller accumulated value
+    pressure_penalty = max(0.55, 1.0 - 0.08 * net_pressure)
+    forecast_kg = round(base * ha * stage_multiplier * pressure_penalty, 0)
+
+    # Health score
+    health = int(max(30, min(100, 90 - 12 * net_pressure + 5 * spray_hits)))
+
+    # Loss estimate from untreated pressure
+    loss_kg = round(base * ha * 0.08 * net_pressure, 0)
+
+    # Price per kg by crop (Nigerian mid-2026 reference)
+    PRICES = {
+        "maize": 380, "rice": 950, "sorghum": 420, "millet": 460,
+        "cowpea (beans)": 780, "beans": 780, "soybean": 620,
+        "groundnut": 700, "tomato": 850, "pepper": 900,
+        "onion": 700, "cabbage": 450, "cassava": 180, "yam": 500,
+    }
+    price = PRICES.get(crop_key, 400)
+
+    # Ask Groq for a one-line narrative + action
+    system = (
+        "You are GAIA, a Nigerian agronomist. Respond in " + lang + ". "
+        "Be brief, warm, specific. Never mention AI. "
+        "Reply with exactly two sections labeled 'HEADLINE:' and 'ACTION:'. "
+        "HEADLINE max 15 words. ACTION max 18 words. Nothing else."
+    )
+    user = (
+        f"Crop: {req.crop}. Stage: {req.stage}. "
+        f"Day {req.days_since_planting}. {req.days_to_harvest} days to harvest. "
+        f"Forecast yield: {forecast_kg} kg. Value: N{forecast_kg * price:,.0f}. "
+        f"Health: {health}/100. Recent disease events: {disease_hits}, sprays: {spray_hits}."
+    )
+
+    headline = ""
+    action = ""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                GROQ_URL,
+                headers={"Authorization": "Bearer " + GROQ_KEY, "Content-Type": "application/json"},
+                json={
+                    "model": GROQ_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": 0.5,
+                    "max_tokens": 120,
+                },
+            )
+        if r.status_code == 200:
+            text = r.json()["choices"][0]["message"]["content"].strip()
+            for line in text.splitlines():
+                l = line.strip()
+                if l.upper().startswith("HEADLINE:"):
+                    headline = l.split(":", 1)[1].strip()
+                elif l.upper().startswith("ACTION:"):
+                    action = l.split(":", 1)[1].strip()
+    except Exception:
+        pass
+
+    if not headline:
+        headline = f"Your {req.crop} is on track."
+    if not action:
+        action = "Keep scouting weekly for pests and disease."
+
+    return {
+        "ok": True,
+        "forecast_kg": forecast_kg,
+        "price_per_kg_naira": price,
+        "live_value_naira": forecast_kg * price,
+        "health_score": health,
+        "loss_estimate_naira": loss_kg * price,
+        "loss_kg": loss_kg,
+        "headline": headline,
+        "action": action,
+        "language": req.language,
+    }
+
+
+class WeatherRequest(BaseModel):
+    lat: float
+    lng: float
+
+
+@router.post("/season/weather")
+async def season_weather(req: WeatherRequest):
+    """14-day forecast from Open-Meteo. Free, no key."""
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": req.lat,
+        "longitude": req.lng,
+        "daily": ["temperature_2m_max", "temperature_2m_min",
+                  "precipitation_sum", "relative_humidity_2m_max"],
+        "forecast_days": 14,
+        "timezone": "auto",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url, params=params)
+        if r.status_code != 200:
+            raise HTTPException(r.status_code, "weather failed")
+        d = r.json().get("daily", {})
+        days = []
+        for i in range(len(d.get("time", []))):
+            days.append({
+                "date": d["time"][i],
+                "t_max": d["temperature_2m_max"][i],
+                "t_min": d["temperature_2m_min"][i],
+                "rain_mm": d["precipitation_sum"][i],
+                "humidity": d["relative_humidity_2m_max"][i],
+            })
+        total_rain = sum(day["rain_mm"] or 0 for day in days)
+        return {"ok": True, "days": days, "total_rain_14d_mm": round(total_rain, 1)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, "weather: " + str(e)[:120])
