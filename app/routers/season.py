@@ -443,3 +443,137 @@ async def radio_segment(req: RadioRequest, authorization: str = Header(None)):
         "language": req.language,
         "duration_estimate_sec": max(30, len(full_text) // 14),
     }
+
+
+# ============================================================
+# SOS — sends SMS to emergency contacts via Termii
+# ============================================================
+
+class SOSRequest(BaseModel):
+    lat: float
+    lng: float
+    kind: str = "general"
+    message: Optional[str] = None
+    user_email: Optional[str] = None
+    user_name: Optional[str] = None
+    emergency_contacts: Optional[list] = []
+
+
+def _normalize_ng_phone(p: str) -> str:
+    if not p: return ""
+    p = p.replace("+", "").replace(" ", "").replace("-", "").strip()
+    if p.startswith("0"): return "234" + p[1:]
+    if p.startswith("234"): return p
+    return "234" + p
+
+
+@router.post("/sos")
+async def sos(req: SOSRequest, authorization: str = Header(None)):
+    """Send SOS SMS to emergency contacts. Fire and forget."""
+    termii_key = os.environ.get("TERMII_API_KEY", "")
+    if not termii_key:
+        return {"ok": False, "reason": "SMS not configured"}
+
+    maps_url = f"https://maps.google.com/?q={req.lat},{req.lng}"
+    who = req.user_name or req.user_email or "A GAIA farmer"
+    body = (
+        f"GAIA SOS from {who}. "
+        f"Kind: {req.kind}. "
+        f"{('Message: ' + req.message + '. ') if req.message else ''}"
+        f"Location: {maps_url}"
+    )[:300]
+
+    sent = 0
+    failed = 0
+    async with httpx.AsyncClient(timeout=15) as client:
+        for c in (req.emergency_contacts or []):
+            phone = _normalize_ng_phone(c.get("phone", ""))
+            if not phone or len(phone) < 12:
+                continue
+            try:
+                r = await client.post(
+                    "https://api.ng.termii.com/api/sms/send",
+                    json={
+                        "api_key": termii_key,
+                        "to": phone,
+                        "from": "GAIA",
+                        "sms": body,
+                        "type": "plain",
+                        "channel": "generic",
+                    },
+                )
+                if r.status_code == 200:
+                    sent += 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+
+    return {"ok": True, "sent": sent, "failed": failed, "body_preview": body[:140]}
+
+
+# ============================================================
+# SOS — sends SMS to emergency contacts via Termii
+# ============================================================
+
+class SOSRequest(BaseModel):
+    lat: float
+    lng: float
+    kind: str = "general"
+    message: Optional[str] = None
+    user_email: Optional[str] = None
+    user_name: Optional[str] = None
+    emergency_contacts: Optional[list] = []
+
+
+def _normalize_ng_phone(p: str) -> str:
+    if not p: return ""
+    p = p.replace("+", "").replace(" ", "").replace("-", "").strip()
+    if p.startswith("0"): return "234" + p[1:]
+    if p.startswith("234"): return p
+    return "234" + p
+
+
+@router.post("/sos")
+async def sos(req: SOSRequest, authorization: str = Header(None)):
+    """Send SOS SMS to emergency contacts. Fire and forget."""
+    termii_key = os.environ.get("TERMII_API_KEY", "")
+    if not termii_key:
+        return {"ok": False, "reason": "SMS not configured"}
+
+    maps_url = f"https://maps.google.com/?q={req.lat},{req.lng}"
+    who = req.user_name or req.user_email or "A GAIA farmer"
+    body = (
+        f"GAIA SOS from {who}. "
+        f"Kind: {req.kind}. "
+        f"{('Message: ' + req.message + '. ') if req.message else ''}"
+        f"Location: {maps_url}"
+    )[:300]
+
+    sent = 0
+    failed = 0
+    async with httpx.AsyncClient(timeout=15) as client:
+        for c in (req.emergency_contacts or []):
+            phone = _normalize_ng_phone(c.get("phone", ""))
+            if not phone or len(phone) < 12:
+                continue
+            try:
+                r = await client.post(
+                    "https://api.ng.termii.com/api/sms/send",
+                    json={
+                        "api_key": termii_key,
+                        "to": phone,
+                        "from": "GAIA",
+                        "sms": body,
+                        "type": "plain",
+                        "channel": "generic",
+                    },
+                )
+                if r.status_code == 200:
+                    sent += 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+
+    return {"ok": True, "sent": sent, "failed": failed, "body_preview": body[:140]}
