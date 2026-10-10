@@ -342,3 +342,104 @@ async def season_weather(req: WeatherRequest):
         raise
     except Exception as e:
         raise HTTPException(500, "weather: " + str(e)[:120])
+
+
+# ============================================================
+# FIELD RADIO — 30 min segments of weather + action + price + tip
+# ============================================================
+
+class RadioRequest(BaseModel):
+    crop: str
+    stage: str
+    days_since_planting: int
+    days_to_harvest: int
+    state: Optional[str] = None
+    language: Optional[str] = "en"
+    recent_events: Optional[list] = []
+    weather: Optional[dict] = None
+    market_price_naira_per_kg: Optional[float] = None
+
+
+@router.post("/season/radio-segment")
+async def radio_segment(req: RadioRequest, authorization: str = Header(None)):
+    """Return a 45-90 second radio segment as structured text for TTS."""
+    if not GROQ_KEY:
+        raise HTTPException(500, "GROQ_API_KEY not configured")
+
+    lang = LANG_NAMES.get((req.language or "en").split("-")[0], "English")
+
+    system = (
+        "You are GAIA, a Nigerian farm radio host. Respond in " + lang + ". "
+        "Warm, clear, unhurried — like a real radio presenter. "
+        "Never mention AI. Read like a spoken segment, not written text. "
+        "Reply with EXACTLY five sections, each on its own line: "
+        "WEATHER: one sentence about next 3 days (max 18 words). "
+        "ACTION: the single most important task today (max 18 words). "
+        "PRICE: current market price and trend (max 15 words). "
+        "TIP: one agronomy tip for this stage (max 20 words). "
+        "SIGN_OFF: one warm closing sentence (max 12 words)."
+    )
+
+    recent = ", ".join([e.get("label", "") for e in (req.recent_events or [])[-5:]]) or "no recent activity"
+    weather_summary = "no weather data"
+    if req.weather and req.weather.get("days"):
+        days = req.weather["days"][:3]
+        weather_summary = " | ".join(
+            f"{d['date']}: {d['t_max']:.0f}C {d.get('rain_mm', 0):.0f}mm" for d in days
+        )
+
+    user = (
+        f"Crop: {req.crop}. Stage: {req.stage}. "
+        f"Day {req.days_since_planting} since planting. "
+        f"{req.days_to_harvest} days to harvest. "
+        f"State: {req.state or 'Nigeria'}. "
+        f"Weather: {weather_summary}. "
+        f"Recent: {recent}. "
+        f"Market price today: N{req.market_price_naira_per_kg or 'unknown'} per kg."
+    )
+
+    async with httpx.AsyncClient(timeout=45) as client:
+        r = await client.post(
+            GROQ_URL,
+            headers={"Authorization": "Bearer " + GROQ_KEY, "Content-Type": "application/json"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.55,
+                "max_tokens": 300,
+            },
+        )
+
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, "Groq failed: " + r.text[:200])
+
+    text = r.json()["choices"][0]["message"]["content"].strip()
+
+    segments = {"weather": "", "action": "", "price": "", "tip": "", "sign_off": ""}
+    for line in text.splitlines():
+        l = line.strip()
+        for key, label in [("weather", "WEATHER:"), ("action", "ACTION:"),
+                           ("price", "PRICE:"), ("tip", "TIP:"),
+                           ("sign_off", "SIGN_OFF:")]:
+            if l.upper().startswith(label):
+                segments[key] = l.split(":", 1)[1].strip()
+                break
+
+    full_text = (
+        segments["weather"] + ". " +
+        segments["action"] + ". " +
+        segments["price"] + ". " +
+        segments["tip"] + ". " +
+        segments["sign_off"]
+    ).strip()
+
+    return {
+        "ok": True,
+        "segments": segments,
+        "full_text": full_text,
+        "language": req.language,
+        "duration_estimate_sec": max(30, len(full_text) // 14),
+    }
