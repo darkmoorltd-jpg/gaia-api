@@ -15,6 +15,7 @@ class RegisterFarmerBody(BaseModel):
     full_name: str
     phone: str
     email: Optional[str] = None
+    password: Optional[str] = None
     state: str
     lga: Optional[str] = None
     crop: Optional[str] = None
@@ -78,7 +79,11 @@ async def register_farmer(body: RegisterFarmerBody, authorization: str = Header(
     farmer_email = (body.email or '').strip().lower() if body.email else (phone + "@farmer.gaia")
     if farmer_email and '@' not in farmer_email:
         raise HTTPException(400, "Invalid email format")
-    temp_password = secrets.token_urlsafe(12)
+    # Agent-supplied password (agent tells the farmer). Fallback to random 8-char.
+    if body.password and len(body.password.strip()) >= 6:
+        temp_password = body.password.strip()
+    else:
+        temp_password = secrets.token_urlsafe(6)  # ~8 chars
 
     async with httpx.AsyncClient(timeout=30) as client:
         # Check by phone
@@ -349,4 +354,122 @@ async def notify_verification(body: NotifyVerificationBody, authorization: str =
             "email_sent": email_sent,
             "payment_url": payment_url,
             "verification_id": body.verification_id,
+        }
+
+
+
+class SubmitVerificationBody(BaseModel):
+    farmer_id: str
+    full_name: str
+    phone: str
+    state: str
+    lga: Optional[str] = None
+    address: Optional[str] = None
+    bvn: Optional[str] = None
+    nin: Optional[str] = None
+    id_type: str = "National ID Card"
+    id_number: Optional[str] = None
+    crop: Optional[str] = None
+    farm_state: Optional[str] = None
+    farm_lga: Optional[str] = None
+    farm_size: Optional[str] = None
+    id_image_url: Optional[str] = None
+    selfie_url: Optional[str] = None
+    gps_lat: Optional[float] = None
+    gps_lng: Optional[float] = None
+    payment_reference: str
+
+
+@router.post("/agent/submit-verification")
+async def submit_verification(body: SubmitVerificationBody, authorization: str = Header(None)):
+    """End-to-end: verify Paystack ref -> create verification row (paid) -> notify admin."""
+    if not SERVICE_KEY:
+        raise HTTPException(500, "Service key not configured")
+
+    agent_id, _prof = await _get_agent(authorization)
+
+    # 1) Verify Paystack reference
+    paystack_secret = os.environ.get("PAYSTACK_SECRET_KEY", "")
+    if not paystack_secret:
+        raise HTTPException(500, "Paystack secret not configured")
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(
+            "https://api.paystack.co/transaction/verify/" + body.payment_reference,
+            headers={"Authorization": "Bearer " + paystack_secret},
+        )
+        if r.status_code != 200:
+            raise HTTPException(400, "Could not verify payment: " + r.text[:200])
+        pdata = r.json().get("data", {})
+        if pdata.get("status") != "success":
+            raise HTTPException(400, "Payment not successful")
+        amount_naira = pdata.get("amount", 0) / 100
+        if amount_naira < 2000:
+            raise HTTPException(400, "Insufficient payment amount (need N2000, got N" + str(amount_naira) + ")")
+
+        # 2) Create the verification row via SQL RPC
+        r2 = await client.post(
+            SUPABASE_URL + "/rest/v1/rpc/agent_submit_verification",
+            headers={
+                "apikey": SERVICE_KEY,
+                "Authorization": "Bearer " + SERVICE_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "p_farmer_id": body.farmer_id,
+                "p_full_name": body.full_name,
+                "p_phone": body.phone,
+                "p_state": body.state,
+                "p_lga": body.lga,
+                "p_address": body.address,
+                "p_bvn": body.bvn,
+                "p_nin": body.nin,
+                "p_id_type": body.id_type,
+                "p_id_number": body.id_number,
+                "p_crop": body.crop,
+                "p_farm_state": body.farm_state or body.state,
+                "p_farm_lga": body.farm_lga or body.lga,
+                "p_farm_size": body.farm_size,
+                "p_id_image_url": body.id_image_url,
+                "p_selfie_url": body.selfie_url,
+                "p_gps_lat": body.gps_lat,
+                "p_gps_lng": body.gps_lng,
+                "p_payment_reference": body.payment_reference,
+                "p_payment_status": "paid",
+            },
+        )
+        if r2.status_code != 200:
+            raise HTTPException(500, "Verification RPC failed: " + r2.text[:200])
+        verif = r2.json()
+
+        # 3) Create admin notification
+        payment_url = "https://gaia-api-xuly.onrender.com/verify/pay/" + str(verif.get("verification_id"))
+        try:
+            await client.post(
+                SUPABASE_URL + "/rest/v1/admin_notifications",
+                headers={
+                    "apikey": SERVICE_KEY,
+                    "Authorization": "Bearer " + SERVICE_KEY,
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                json={
+                    "kind": "verification_paid",
+                    "farmer_id": body.farmer_id,
+                    "verification_id": verif.get("verification_id"),
+                    "agent_id": agent_id,
+                    "title": "PAID verification: " + body.full_name,
+                    "body": "N2,000 received. Ready for admin review.",
+                    "meta": {"phone": body.phone, "state": body.state, "amount": amount_naira},
+                },
+            )
+        except Exception as e:
+            print("admin_notifications insert failed:", str(e)[:200])
+
+        return {
+            "ok": True,
+            "verification_id": verif.get("verification_id"),
+            "agent_verification_id": verif.get("agent_verification_id"),
+            "payment_amount": amount_naira,
+            "status": verif.get("status"),
         }
