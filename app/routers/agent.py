@@ -14,6 +14,7 @@ SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 class RegisterFarmerBody(BaseModel):
     full_name: str
     phone: str
+    email: Optional[str] = None
     state: str
     lga: Optional[str] = None
     crop: Optional[str] = None
@@ -73,7 +74,10 @@ async def register_farmer(body: RegisterFarmerBody, authorization: str = Header(
     if not phone or len(phone) < 10:
         raise HTTPException(400, "Invalid phone number")
 
-    farmer_email = phone + "@farmer.gaia"
+    # Use provided email if present, else phone-based synthetic email
+    farmer_email = (body.email or '').strip().lower() if body.email else (phone + "@farmer.gaia")
+    if farmer_email and '@' not in farmer_email:
+        raise HTTPException(400, "Invalid email format")
     temp_password = secrets.token_urlsafe(12)
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -177,6 +181,31 @@ async def register_farmer(body: RegisterFarmerBody, authorization: str = Header(
         if r.status_code not in (200, 201):
             print("agent_registrations insert failed:", r.status_code, r.text[:200])
 
+    # Send credentials to farmer via SMS
+    try:
+        termii_key = os.environ.get("TERMII_API_KEY", "")
+        if termii_key:
+            sms_body = (
+                "GAIA Account Created\n"
+                + "Login: " + (body.email if body.email else phone) + "\n"
+                + "Password: " + temp_password + "\n"
+                + "Change password after first login."
+            )
+            async with httpx.AsyncClient(timeout=15) as client:
+                await client.post(
+                    "https://api.ng.termii.com/api/sms/send",
+                    json={
+                        "api_key": termii_key,
+                        "to": phone,
+                        "from": "GAIA",
+                        "sms": sms_body,
+                        "type": "plain",
+                        "channel": "generic",
+                    },
+                )
+    except Exception as e:
+        print("credential SMS failed:", str(e)[:200])
+
     return {
         "ok": True,
         "farmer_id": farmer_id,
@@ -184,3 +213,127 @@ async def register_farmer(body: RegisterFarmerBody, authorization: str = Header(
         "phone": phone,
         "temp_password": temp_password,
     }
+
+
+
+class NotifyVerificationBody(BaseModel):
+    verification_id: int
+
+
+@router.post("/agent/notify-verification")
+async def notify_verification(body: NotifyVerificationBody, authorization: str = Header(None)):
+    """Called by mobile after agent submits a verification.
+    Emails darkmoorltd@gmail.com with farmer details + payment link.
+    Falls back to a Termii SMS if RESEND_API_KEY is not set.
+    """
+    if not SERVICE_KEY:
+        raise HTTPException(500, "Service key not configured")
+
+    agent_id, _prof = await _get_agent(authorization)
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        # Fetch farmer + verification details
+        r = await client.get(
+            SUPABASE_URL + "/rest/v1/farmer_verifications",
+            params={
+                "select": "id,user_id,full_name,phone,state,lga,bvn,nin,created_at",
+                "id": "eq." + str(body.verification_id),
+            },
+            headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY},
+        )
+        if r.status_code != 200 or not r.json():
+            raise HTTPException(404, "Verification not found")
+        v = r.json()[0]
+
+        # Fetch agent email
+        r2 = await client.get(
+            SUPABASE_URL + "/auth/v1/admin/users/" + agent_id,
+            headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY},
+        )
+        agent_email = ""
+        if r2.status_code == 200:
+            agent_email = r2.json().get("email", "")
+
+        # Payment link — one-click farmer-facing page
+        payment_url = "https://gaia-api-xuly.onrender.com/verify/pay/" + str(body.verification_id)
+
+        # Log the notification in Supabase so admin sees it in-app
+        try:
+            await client.post(
+                SUPABASE_URL + "/rest/v1/admin_notifications",
+                headers={
+                    "apikey": SERVICE_KEY,
+                    "Authorization": "Bearer " + SERVICE_KEY,
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                json={
+                    "kind": "verification_payment",
+                    "farmer_id": v.get("user_id"),
+                    "verification_id": body.verification_id,
+                    "agent_id": agent_id,
+                    "title": "Verification submitted: " + (v.get("full_name") or "Farmer"),
+                    "body": "Fee N2,000 pending. Forward link to farmer: " + payment_url,
+                    "meta": {"phone": v.get("phone"), "state": v.get("state"), "payment_url": payment_url},
+                },
+            )
+        except Exception as e:
+            print("admin_notifications insert failed:", str(e)[:200])
+
+        # Send email via Resend if configured
+        resend_key = os.environ.get("RESEND_API_KEY", "")
+        email_sent = False
+        if resend_key:
+            try:
+                html = (
+                    "<h2>New Verification — Payment Pending</h2>"
+                    "<p><b>Farmer:</b> " + str(v.get("full_name") or "Unknown") + "</p>"
+                    "<p><b>Phone:</b> " + str(v.get("phone") or "-") + "</p>"
+                    "<p><b>State:</b> " + str(v.get("state") or "-") + " / " + str(v.get("lga") or "-") + "</p>"
+                    "<p><b>BVN:</b> " + str(v.get("bvn") or "-") + "</p>"
+                    "<p><b>NIN:</b> " + str(v.get("nin") or "-") + "</p>"
+                    "<p><b>Agent:</b> " + agent_email + "</p>"
+                    "<p><b>Payment link (forward to farmer):</b><br>"
+                    "<a href='" + payment_url + "'>" + payment_url + "</a></p>"
+                    "<p><b>Fee:</b> N2,000</p>"
+                )
+                rr = await client.post(
+                    "https://api.resend.com/emails",
+                    headers={"Authorization": "Bearer " + resend_key, "Content-Type": "application/json"},
+                    json={
+                        "from": "GAIA <noreply@darkmoor.ng>",
+                        "to": ["darkmoorltd@gmail.com"],
+                        "subject": "GAIA Verification: " + str(v.get("full_name") or "New farmer"),
+                        "html": html,
+                    },
+                )
+                email_sent = rr.status_code in (200, 201)
+            except Exception as e:
+                print("resend failed:", str(e)[:200])
+
+        # Fallback SMS to admin
+        if not email_sent:
+            try:
+                termii_key = os.environ.get("TERMII_API_KEY", "")
+                admin_phone = os.environ.get("ADMIN_PHONE", "")
+                if termii_key and admin_phone:
+                    await client.post(
+                        "https://api.ng.termii.com/api/sms/send",
+                        json={
+                            "api_key": termii_key,
+                            "to": admin_phone,
+                            "from": "GAIA",
+                            "sms": "New verify: " + str(v.get("full_name") or "?") + " / " + str(v.get("phone") or "?") + " / pay: " + payment_url,
+                            "type": "plain",
+                            "channel": "generic",
+                        },
+                    )
+            except Exception as e:
+                print("admin SMS failed:", str(e)[:200])
+
+        return {
+            "ok": True,
+            "email_sent": email_sent,
+            "payment_url": payment_url,
+            "verification_id": body.verification_id,
+        }
