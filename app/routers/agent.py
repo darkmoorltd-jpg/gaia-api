@@ -81,6 +81,7 @@ async def register_farmer(body: RegisterFarmerBody, authorization: str = Header(
     temp_password = secrets.token_urlsafe(12)
 
     async with httpx.AsyncClient(timeout=30) as client:
+        # Check by phone
         r = await client.get(
             SUPABASE_URL + "/rest/v1/user_profiles",
             params={"select": "user_id", "phone": "eq." + phone},
@@ -88,6 +89,17 @@ async def register_farmer(body: RegisterFarmerBody, authorization: str = Header(
         )
         if r.status_code == 200 and r.json():
             raise HTTPException(409, "A farmer with this phone already exists")
+
+        # Check by email if provided
+        if body.email:
+            check_email = body.email.strip().lower()
+            r = await client.get(
+                SUPABASE_URL + "/rest/v1/user_profiles",
+                params={"select": "user_id", "email": "eq." + check_email},
+                headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY},
+            )
+            if r.status_code == 200 and r.json():
+                raise HTTPException(409, "A farmer with this email already exists")
 
         r = await client.post(
             SUPABASE_URL + "/auth/v1/admin/users",
@@ -122,8 +134,9 @@ async def register_farmer(body: RegisterFarmerBody, authorization: str = Header(
                 "apikey": SERVICE_KEY,
                 "Authorization": "Bearer " + SERVICE_KEY,
                 "Content-Type": "application/json",
-                "Prefer": "return=minimal",
+                "Prefer": "return=minimal,resolution=merge-duplicates",
             },
+            params={"on_conflict": "user_id"},
             json={
                 "user_id": farmer_id,
                 "email": farmer_email,
