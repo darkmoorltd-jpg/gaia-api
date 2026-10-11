@@ -473,3 +473,275 @@ async def submit_verification(body: SubmitVerificationBody, authorization: str =
             "payment_amount": amount_naira,
             "status": verif.get("status"),
         }
+
+
+
+class CreateAgentBody(BaseModel):
+    email: str
+    password: str
+    first_name: str
+    last_name: str
+    phone: str
+    agent_zone: Optional[str] = None
+    agent_organization: Optional[str] = None
+    agent_code: Optional[str] = None
+    send_welcome_sms: bool = True
+
+
+async def _get_admin(authorization: str):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing Bearer token")
+    token = authorization.split(" ", 1)[1]
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            SUPABASE_URL + "/auth/v1/user",
+            headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + token},
+        )
+        if r.status_code != 200:
+            raise HTTPException(401, "Invalid token")
+        user = r.json()
+        if user.get("email") != "darkmoorltd@gmail.com":
+            raise HTTPException(403, "Admin only")
+        return user.get("id")
+
+
+@router.post("/admin/create-agent")
+async def create_agent(body: CreateAgentBody, authorization: str = Header(None)):
+    if not SERVICE_KEY:
+        raise HTTPException(500, "Service key not configured")
+
+    await _get_admin(authorization)
+
+    email = body.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(400, "Invalid email")
+
+    if len(body.password) < 6:
+        raise HTTPException(400, "Password must be at least 6 chars")
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Resolve agent code
+        agent_code = (body.agent_code or "").strip().upper()
+        if not agent_code:
+            r = await client.post(
+                SUPABASE_URL + "/rest/v1/rpc/admin_next_agent_code",
+                headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY, "Content-Type": "application/json"},
+                json={},
+            )
+            if r.status_code == 200:
+                agent_code = r.json()
+
+        # Check duplicate code
+        r = await client.get(
+            SUPABASE_URL + "/rest/v1/user_profiles",
+            params={"select": "user_id", "agent_code": "eq." + agent_code},
+            headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY},
+        )
+        if r.status_code == 200 and r.json():
+            raise HTTPException(409, "Agent code already in use: " + agent_code)
+
+        # Create auth user
+        r = await client.post(
+            SUPABASE_URL + "/auth/v1/admin/users",
+            headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY, "Content-Type": "application/json"},
+            json={
+                "email": email,
+                "password": body.password,
+                "email_confirm": True,
+                "user_metadata": {
+                    "first_name": body.first_name,
+                    "last_name": body.last_name,
+                    "role": "agent",
+                },
+            },
+        )
+        if r.status_code not in (200, 201):
+            msg = r.text[:200]
+            if "already" in msg.lower():
+                raise HTTPException(409, "Email already registered")
+            raise HTTPException(500, "Auth create failed: " + msg)
+        user_id = r.json()["id"]
+
+        # Set profile via RPC
+        r = await client.post(
+            SUPABASE_URL + "/rest/v1/rpc/admin_set_agent_profile",
+            headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY, "Content-Type": "application/json"},
+            json={
+                "p_user_id": user_id,
+                "p_first_name": body.first_name,
+                "p_last_name": body.last_name,
+                "p_phone": body.phone,
+                "p_agent_code": agent_code,
+                "p_agent_zone": body.agent_zone,
+                "p_agent_organization": body.agent_organization,
+            },
+        )
+        if r.status_code not in (200, 201, 204):
+            await client.delete(
+                SUPABASE_URL + "/auth/v1/admin/users/" + user_id,
+                headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY},
+            )
+            raise HTTPException(500, "Profile set failed: " + r.text[:200])
+
+        # Free scans
+        try:
+            await client.post(
+                SUPABASE_URL + "/rest/v1/user_scans",
+                headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY, "Content-Type": "application/json"},
+                json={"user_id": user_id, "scans_remaining": 100, "plan": "agent"},
+            )
+        except Exception:
+            pass
+
+        # Welcome SMS
+        if body.send_welcome_sms:
+            try:
+                termii_key = os.environ.get("TERMII_API_KEY", "")
+                if termii_key:
+                    sms = "GAIA Agent account ready. Login: " + email + " / Password: " + body.password + " / Agent code: " + agent_code + " / Open GAIA app > Agent tab."
+                    await client.post(
+                        "https://api.ng.termii.com/api/sms/send",
+                        json={
+                            "api_key": termii_key,
+                            "to": normalize_phone(body.phone),
+                            "from": "GAIA",
+                            "sms": sms,
+                            "type": "plain",
+                            "channel": "generic",
+                        },
+                    )
+            except Exception as e:
+                print("welcome SMS failed:", str(e)[:200])
+
+        return {
+            "ok": True,
+            "user_id": user_id,
+            "email": email,
+            "agent_code": agent_code,
+            "password": body.password,
+        }
+
+
+class AgentApplyBody(BaseModel):
+    full_name: str
+    email: str
+    phone: str
+    state: Optional[str] = None
+    lga: Optional[str] = None
+    zone: Optional[str] = None
+    organization: Optional[str] = None
+    experience_years: int = 0
+    motivation: Optional[str] = None
+
+
+@router.post("/agent/apply")
+async def agent_apply(body: AgentApplyBody):
+    """Public — anyone can apply to become an agent. Admin reviews."""
+    if not SERVICE_KEY:
+        raise HTTPException(500, "Service key not configured")
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            SUPABASE_URL + "/rest/v1/agent_applications",
+            headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY, "Content-Type": "application/json", "Prefer": "return=representation"},
+            json={
+                "full_name": body.full_name,
+                "email": body.email.strip().lower(),
+                "phone": normalize_phone(body.phone),
+                "state": body.state,
+                "lga": body.lga,
+                "zone": body.zone,
+                "organization": body.organization,
+                "experience_years": body.experience_years,
+                "motivation": body.motivation,
+            },
+        )
+        if r.status_code not in (200, 201):
+            raise HTTPException(500, "Application failed: " + r.text[:200])
+
+        # Notify admin email (best-effort)
+        try:
+            await client.post(
+                SUPABASE_URL + "/rest/v1/admin_notifications",
+                headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY, "Content-Type": "application/json", "Prefer": "return=minimal"},
+                json={
+                    "kind": "agent_application",
+                    "title": "New agent application: " + body.full_name,
+                    "body": body.email + " / " + normalize_phone(body.phone) + " / " + (body.state or "?") + " / " + (body.zone or "?"),
+                    "meta": {"state": body.state, "zone": body.zone, "organization": body.organization},
+                },
+            )
+        except Exception:
+            pass
+
+        return {"ok": True, "message": "Application submitted. Admin will contact you."}
+
+
+class ReviewApplicationBody(BaseModel):
+    application_id: str
+    action: str  # approve or reject
+    password: Optional[str] = None
+    agent_zone: Optional[str] = None
+    agent_code: Optional[str] = None
+    rejection_reason: Optional[str] = None
+
+
+@router.post("/admin/review-agent-application")
+async def review_agent_application(body: ReviewApplicationBody, authorization: str = Header(None)):
+    if not SERVICE_KEY:
+        raise HTTPException(500, "Service key not configured")
+
+    await _get_admin(authorization)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(
+            SUPABASE_URL + "/rest/v1/agent_applications",
+            params={"select": "*", "id": "eq." + body.application_id},
+            headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY},
+        )
+        if r.status_code != 200 or not r.json():
+            raise HTTPException(404, "Application not found")
+        app = r.json()[0]
+
+        if body.action == "reject":
+            await client.patch(
+                SUPABASE_URL + "/rest/v1/agent_applications",
+                params={"id": "eq." + body.application_id},
+                headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY, "Content-Type": "application/json"},
+                json={"status": "rejected", "rejection_reason": body.rejection_reason or "Rejected"},
+            )
+            return {"ok": True, "status": "rejected"}
+
+        if body.action == "approve":
+            if not body.password or len(body.password) < 6:
+                raise HTTPException(400, "password required to approve")
+
+            result = await create_agent(
+                CreateAgentBody(
+                    email=app["email"],
+                    password=body.password,
+                    first_name=app["full_name"].split()[0] if app["full_name"] else "",
+                    last_name=" ".join(app["full_name"].split()[1:]) if len(app["full_name"].split()) > 1 else "",
+                    phone=app["phone"],
+                    agent_zone=body.agent_zone or app.get("zone"),
+                    agent_organization=app.get("organization"),
+                    agent_code=body.agent_code,
+                    send_welcome_sms=True,
+                ),
+                authorization=authorization,
+            )
+
+            await client.patch(
+                SUPABASE_URL + "/rest/v1/agent_applications",
+                params={"id": "eq." + body.application_id},
+                headers={"apikey": SERVICE_KEY, "Authorization": "Bearer " + SERVICE_KEY, "Content-Type": "application/json"},
+                json={
+                    "status": "approved",
+                    "reviewed_at": "now()",
+                    "created_agent_id": result["user_id"],
+                },
+            )
+            return result
+
+        raise HTTPException(400, "action must be approve or reject")
