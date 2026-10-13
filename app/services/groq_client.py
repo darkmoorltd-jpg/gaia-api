@@ -54,9 +54,10 @@ def _headers():
     }
 
 
-def chat_text(question, history=None):
+def chat_text(question, history=None, system_override=None):
     history = history or []
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    sys_prompt = system_override or SYSTEM_PROMPT
+    messages = [{"role": "system", "content": sys_prompt}]
     for h in history[-20:]:
         if isinstance(h, dict) and "role" in h and "content" in h:
             messages.append({"role": h["role"], "content": h["content"]})

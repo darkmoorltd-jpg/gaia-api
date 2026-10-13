@@ -8,6 +8,7 @@ from PIL import Image
 import io
 
 from app.services.auth import verify_supabase_token
+from app.services.recommendations import get_recommendations
 from app.services.model_registry import ModelRegistry
 from app.services.scan_service import deduct_scan
 from app.schemas.diagnosis import DiagnosisResponse
@@ -148,12 +149,22 @@ async def diagnose(
 
     elapsed = int((time.time() - start) * 1000)
 
+    # Generate advice via Groq (cached, non-blocking on failure)
+    recommendations = None
+    try:
+        top_label = preds[0].label if hasattr(preds[0], "label") else preds[0]["label"]
+        top_conf = preds[0].confidence if hasattr(preds[0], "confidence") else preds[0]["confidence"]
+        recommendations = get_recommendations(model, top_label, top_conf, extra_context="")
+    except Exception as e:
+        print("recommendations failed:", str(e)[:200])
+
     return DiagnosisResponse(
         predictions=preds,
         top=preds[0],
         model=model,
         processingMs=elapsed,
         scansRemaining=remaining,
+        recommendations=recommendations,
     )
 
 
