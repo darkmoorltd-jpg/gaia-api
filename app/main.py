@@ -31,6 +31,7 @@ from app.routers.notifications import router as notifications_router
 from app.routers.payment import router as payment_router
 from app.routers.agro_tools import router as agro_router
 from app.routers.season import router as season_router
+from app.routers.agronomist import router as agronomist_router
 
 registry = None
 
@@ -70,6 +71,7 @@ app.include_router(notifications_router)
 app.include_router(payment_router)
 app.include_router(agro_router)
 app.include_router(season_router)
+app.include_router(agronomist_router)
 
 app.add_middleware(
     CORSMiddleware,
