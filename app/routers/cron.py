@@ -1,3 +1,5 @@
+import json
+import base64
 import os
 import traceback
 from datetime import datetime
@@ -10,6 +12,26 @@ router = APIRouter()
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
 _ENV_CACHE = None
+
+def _derive_url_from_key(key):
+    """Supabase service keys are JWTs whose payload has 'ref' (project id).
+    URL is always https://{ref}.supabase.co . Return None if we can't parse."""
+    try:
+        parts = key.split(".")
+        if len(parts) < 2:
+            return None
+        payload_b64 = parts[1]
+        # pad base64
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        ref = payload.get("ref")
+        if ref:
+            return "https://" + ref + ".supabase.co"
+    except Exception:
+        pass
+    return None
+
+
 
 
 def _load_env():
@@ -48,6 +70,13 @@ def _load_env():
                         break
             except Exception:
                 continue
+
+    # Fallback: derive URL from service key JWT
+    if not url and key:
+        derived = _derive_url_from_key(key)
+        if derived:
+            url = derived
+            source = source + " + derived_url_from_jwt"
 
     _ENV_CACHE = {"url": url, "key": key, "source": source}
     return _ENV_CACHE
