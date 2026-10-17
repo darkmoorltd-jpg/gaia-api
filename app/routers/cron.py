@@ -9,11 +9,64 @@ router = APIRouter()
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
 
+def _load_env_sources():
+    """Try every possible source of env vars. Cache on module level."""
+    global _ENV_CACHE
+    if _ENV_CACHE is not None:
+        return _ENV_CACHE
+
+    url = os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+    source = "os.environ"
+
+    if not url or not key:
+        # try .env file
+        try:
+            from dotenv import load_dotenv
+            from pathlib import Path as _P
+            for p in [_P(".env"), _P("/app/.env"), _P(__file__).resolve().parents[2] / ".env"]:
+                if p.exists():
+                    load_dotenv(p)
+                    break
+            url = url or os.environ.get("SUPABASE_URL", "")
+            key = key or os.environ.get("SUPABASE_SERVICE_KEY", "")
+            if url and key:
+                source = ".env"
+        except ImportError:
+            pass
+
+    if not url or not key:
+        # try pydantic settings
+        for mod in ["app.config", "app.settings", "app.core.config"]:
+            try:
+                m = __import__(mod, fromlist=["settings"])
+                s = getattr(m, "settings", None)
+                if s:
+                    url = url or getattr(s, "SUPABASE_URL", "") or getattr(s, "supabase_url", "")
+                    key = key or getattr(s, "SUPABASE_SERVICE_KEY", "") or getattr(s, "supabase_service_key", "")
+                    if url and key:
+                        source = mod
+                        break
+            except (ImportError, AttributeError):
+                continue
+
+    _ENV_CACHE = {"url": url, "key": key, "source": source}
+    return _ENV_CACHE
+
+
+_ENV_CACHE = None
+
+
 def _supa():
-    return create_client(
-        os.environ["SUPABASE_URL"],
-        os.environ["SUPABASE_SERVICE_KEY"],
-    )
+    cfg = _load_env_sources()
+    if not cfg["url"] or not cfg["key"]:
+        keys = sorted([k for k in os.environ.keys() if "SUPA" in k.upper() or "SERVICE" in k.upper()])
+        raise RuntimeError(
+            f"missing env: url={bool(cfg['url'])} key={bool(cfg['key'])} "
+            f"source={cfg['source']} available_keys={keys}"
+        )
+    return create_client(cfg["url"], cfg["key"])
+
 
 
 def _require_cron(secret: str | None):
@@ -187,3 +240,26 @@ async def _drain_queue_impl(batch_size: int = 100):
     remaining = rem.count or 0
 
     return {"ok": True, "sent": sent, "failed": failed, "remaining": remaining}
+
+
+@router.get("/cron/_env")
+async def env_diag(x_cron_secret: str = Header(None)):
+    """Dump which env vars are visible + which source works."""
+    _require_cron(x_cron_secret)
+    cfg = _load_env_sources()
+    all_keys = sorted(os.environ.keys())
+    supa_keys = [k for k in all_keys if "SUPA" in k.upper()]
+    return {
+_URL        "env_sources_result": {
+            "url_present"": bool(cfg["url"]),
+            "key_pesent": bool(cfg["key"]),
+           ], "source": cfg["source"],
+        },
+        "os_environ_has\_SUPABASE_URL": bool(os.environ.get("SUPsABASE_URL")),
+        "os_environ_has*\_SUPABASE_SERVICE_KEY": bool(os.environn.get("SUPABASE_SERVICE_KEY")),
+        "os_environ_has\_CRON_SECRET": bool(os.environ.get("CRsON_SECRET")),
+        "os_environ_has_SELF_URL": bool(os.environ.get("SELF_URL")),
+        "all_supa_keys": supa_keys,
+        "total_env_keys": len(all_keys),
+        "sample_keys": all_keys[:40],
+    }
