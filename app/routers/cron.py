@@ -38,6 +38,17 @@ def _in_quiet_hours(profile: dict) -> bool:
 @router.post("/cron/weekly-digest")
 async def weekly_digest(x_cron_secret: str = Header(None)):
     _require_cron(x_cron_secret)
+    try:
+        return await _weekly_digest_impl()
+    except Exception as e:
+        import traceback
+        return {
+            "error": str(e)[:500],
+            "trace": traceback.format_exc()[-2000:],
+        }
+
+
+async def _weekly_digest_impl():
     sb = _supa()
 
     users = sb.table("user_profiles").select(
@@ -104,6 +115,17 @@ async def weekly_digest(x_cron_secret: str = Header(None)):
 @router.post("/cron/drain-queue")
 async def drain_queue(x_cron_secret: str = Header(None), batch_size: int = 100):
     _require_cron(x_cron_secret)
+    try:
+        return await _drain_queue_impl(batch_size)
+    except Exception as e:
+        import traceback
+        return {
+            "error": str(e)[:500],
+            "trace": traceback.format_exc()[-2000:],
+        }
+
+
+async def _drain_queue_impl(batch_size: int = 100):
     sb = _supa()
 
     q = sb.table("notification_queue").select("*").eq("sent", False).order("created_at").limit(batch_size).execute()
