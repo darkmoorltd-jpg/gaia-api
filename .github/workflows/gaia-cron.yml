@@ -1,0 +1,26 @@
+name: GAIA cron
+
+on:
+  schedule:
+    - cron: '0 8 * * 0'      # weekly digest — Sunday 8am UTC (= 9am WAT)
+    - cron: '*/15 * * * *'    # drain queue every 15 min
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Weekly digest (Sundays only)
+        if: github.event.schedule == '0 8 * * 0' || github.event_name == 'workflow_dispatch'
+        run: |
+          curl -sS -X POST https://gaia-api-xuly.onrender.com/cron/weekly-digest \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json" \
+            -m 120
+
+      - name: Drain queue (every 15 min)
+        run: |
+          curl -sS -X POST https://gaia-api-xuly.onrender.com/cron/drain-queue \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json" \
+            -m 120
