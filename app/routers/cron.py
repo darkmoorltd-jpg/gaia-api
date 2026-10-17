@@ -251,8 +251,9 @@ async def env_diag(x_cron_secret: str = Header(None)):
     supa_keys = [k for k in all_keys if "SUPA" in k.upper()]
     return {
 _URL        "env_sources_result": {
-            "url_present"": bool(cfg["url"]),
-            "key_pesent": bool(cfg["key"]),
+            "url_present": bool(cfg["url"]),
+            "key_p
+esent": bool(cfg["key"]),
            ], "source": cfg["source"],
         },
         "os_environ_has\_SUPABASE_URL": bool(os.environ.get("SUPsABASE_URL")),
