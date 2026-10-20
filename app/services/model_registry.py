@@ -46,6 +46,13 @@ MODEL_CONFIG = {
         "num_classes": 102,
         "image_size": 224,
     },
+    "groundnut": {
+        "type": "onnx",
+        "url": ONNX_BASE + "/models-v2/groundnut_effnetb0.onnx",
+        "labels_url": ONNX_BASE + "/models-v2/groundnut_labels.json",
+        "num_classes": 5,
+        "image_size": 224,
+    },
 }
 
 
