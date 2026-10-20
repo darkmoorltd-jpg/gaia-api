@@ -1,28 +1,32 @@
 import os
+import io
 import torch
 import requests
+import numpy as np
 from PIL import Image
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
 
 BASE_URL = "https://github.com/darkmoorltd-jpg/GAIA/releases/download/v1.0"
+ONNX_BASE = "https://github.com/darkmoorltd-jpg/gaia-mobile/releases/download"
 MODELS_DIR = "/tmp/gaia-models"
 
 MODEL_CONFIG = {
     "cattle": {
+        "type": "pytorch",
         "url": BASE_URL + "/gaia_cattle.pt",
         "num_classes": 3,
         "labels": ["Foot-and-Mouth Disease", "Healthy", "Lumpy Skin Disease"],
         "image_size": 224,
     },
-
     "maize": {
+        "type": "pytorch",
         "url": BASE_URL + "/gaia_maize_4class.pt",
         "num_classes": 4,
         "labels": ["Blight", "Common_Rust", "Gray_Leaf_Spot", "Healthy"],
         "image_size": 224,
     },
-
     "rice_6class": {
+        "type": "pytorch",
         "url": BASE_URL + "/gaia_rice_6class.pt",
         "num_classes": 6,
         "labels": [
@@ -33,6 +37,13 @@ MODEL_CONFIG = {
             "Leaf scald",
             "Sheath Blight",
         ],
+        "image_size": 224,
+    },
+    "pests_102class": {
+        "type": "onnx",
+        "url": ONNX_BASE + "/models-v2/pests_102class_v2.onnx",
+        "labels_url": ONNX_BASE + "/models-v2/pests_102_labels.json",
+        "num_classes": 102,
         "image_size": 224,
     },
 }
@@ -81,6 +92,33 @@ def build_model_from_state_dict(state_dict, num_classes):
     return Net()
 
 
+class _ONNXPredictor:
+    """Wraps an ONNX model + labels + preprocessing."""
+    def __init__(self, model_path, labels, image_size):
+        import onnxruntime as ort
+        self.sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        self.labels = labels
+        self.image_size = image_size
+        self.tf = Compose([
+            Resize(int(image_size * 1.14)),
+            Resize((image_size, image_size)),  # force exact 224x224
+            ToTensor(),
+            Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+
+    def predict(self, img):
+        x = self.tf(img).unsqueeze(0).numpy().astype(np.float32)
+        out = self.sess.run(None, {"input": x})[0][0]
+        e = np.exp(out - out.max())
+        probs = e / e.sum()
+        top = np.argsort(probs)[::-1][:5]
+        return [
+            {"label": self.labels[i] if i < len(self.labels) else f"Class {i}",
+             "confidence": float(probs[i] * 100)}
+            for i in top
+        ]
+
+
 class ModelRegistry:
     def __init__(self):
         self._cache = {}
@@ -95,79 +133,68 @@ class ModelRegistry:
     def loaded_keys(self):
         return list(self._cache.keys())
 
-    def _download(self, key, url):
-        path = os.path.join(MODELS_DIR, key + ".pt")
-        if os.path.exists(path) and os.path.getsize(path) > 10000:
-            return path
-        r = requests.get(url, stream=True, timeout=300)
+    def _download(self, url, dest):
+        if os.path.exists(dest) and os.path.getsize(dest) > 10000:
+            return dest
+        r = requests.get(url, timeout=300)
         r.raise_for_status()
-        with open(path, "wb") as f:
-            for chunk in r.iter_content(32768):
-                if chunk:
-                    f.write(chunk)
-        return path
+        with open(dest, "wb") as f:
+            f.write(r.content)
+        return dest
 
-    def _load(self, key):
+    def _load_pytorch(self, key, cfg):
+        path = os.path.join(MODELS_DIR, key + ".pt")
+        if not (os.path.exists(path) and os.path.getsize(path) > 10000):
+            self._download(cfg["url"], path)
+        state = torch.load(path, map_location="cpu", weights_only=False)
+        model = build_model_from_state_dict(state, cfg["num_classes"])
+        model.eval()
+        return model
+
+    def _load_onnx(self, key, cfg):
+        onnx_path = os.path.join(MODELS_DIR, key + ".onnx")
+        if not (os.path.exists(onnx_path) and os.path.getsize(onnx_path) > 10000):
+            self._download(cfg["url"], onnx_path)
+
+        labels_path = os.path.join(MODELS_DIR, key + "_labels.json")
+        if not (os.path.exists(labels_path) and os.path.getsize(labels_path) > 10):
+            self._download(cfg["labels_url"], labels_path)
+        import json
+        labels = json.load(open(labels_path))["classes"]
+
+        return _ONNXPredictor(onnx_path, labels, cfg["image_size"])
+
+    def _get(self, key):
         if key in self._cache:
             return self._cache[key]
         cfg = MODEL_CONFIG[key]
-        path = self._download(key, cfg["url"])
-        state = torch.load(path, map_location="cpu", weights_only=False)
-        state = {k: (v.float() if v.dtype == torch.float16 else v) for k, v in state.items()}
-        model = build_model_from_state_dict(state, cfg["num_classes"])
-        model.eval()
-        self._cache[key] = (model, cfg["labels"])
-        return self._cache[key]
+        if cfg.get("type") == "onnx":
+            obj = self._load_onnx(key, cfg)
+        else:
+            obj = self._load_pytorch(key, cfg)
+        self._cache[key] = obj
+        return obj
 
     def predict(self, key, img):
-        model, labels = self._load(key)
+        obj = self._get(key)
         cfg = MODEL_CONFIG[key]
-        size = cfg.get("image_size", 224)
+
+        if cfg.get("type") == "onnx":
+            return obj.predict(img)
+
+        # PyTorch path
         tf = Compose([
-            Resize((size, size)),
+            Resize((cfg["image_size"], cfg["image_size"])),
             ToTensor(),
             Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ])
-        t = tf(img).unsqueeze(0)
+        x = tf(img).unsqueeze(0)
         with torch.no_grad():
-            probs = torch.softmax(model(t), dim=1)[0].numpy()
-        preds = sorted(
-            [{"label": labels[i], "confidence": float(probs[i] * 100)}
-             for i in range(len(labels))],
-            key=lambda p: -p["confidence"],
-        )
-        return preds[:10]
-
-    def predict_with_cam(self, key, img):
-        from app.services.gradcam import GradCAM, to_base64_png
-
-        model, labels = self._load(key)
-        cfg = MODEL_CONFIG[key]
-        size = cfg.get("image_size", 224)
-        tf = Compose([
-            Resize((size, size)),
-            ToTensor(),
-            Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-        original = img.resize((size, size))
-        t = tf(img).unsqueeze(0)
-
-        with torch.no_grad():
-            probs = torch.softmax(model(t), dim=1)[0].numpy()
-
-        top_idx = int(probs.argmax())
-        preds = sorted(
-            [{"label": labels[i], "confidence": float(probs[i] * 100)}
-             for i in range(len(labels))],
-            key=lambda p: -p["confidence"],
-        )[:10]
-
-        b64 = None
-        try:
-            eng = GradCAM(model)
-            cam = eng.generate(t, target_class=top_idx)
-            b64 = to_base64_png(eng.overlay(original, cam))
-        except Exception as e:
-            print("Grad-CAM failed: " + str(e))
-
-        return preds, b64, top_idx
+            logits = obj(x)
+            probs = torch.nn.functional.softmax(logits, dim=1)[0]
+        top5 = torch.argsort(probs, descending=True)[:5]
+        return [
+            {"label": cfg["labels"][int(i)] if int(i) < len(cfg["labels"]) else f"Class {int(i)}",
+             "confidence": float(probs[int(i)].item() * 100)}
+            for i in top5
+        ]
