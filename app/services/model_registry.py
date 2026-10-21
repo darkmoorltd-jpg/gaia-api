@@ -53,6 +53,13 @@ MODEL_CONFIG = {
         "num_classes": 5,
         "image_size": 224,
     },
+    "millet": {
+        "type": "onnx",
+        "url": ONNX_BASE + "/models-v2/millet_effnetb0.onnx",
+        "labels_url": ONNX_BASE + "/models-v2/millet_labels.json",
+        "num_classes": 3,
+        "image_size": 224,
+    },
 }
 
 
