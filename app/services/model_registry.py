@@ -53,6 +53,13 @@ MODEL_CONFIG = {
         "num_classes": 8,
         "image_size": 224,
     },
+    "okra": {
+        "type": "onnx",
+        "url": ONNX_BASE + "/models-v2/okra_effnetb0.onnx",
+        "labels_url": ONNX_BASE + "/models-v2/okra_labels.json",
+        "num_classes": 6,
+        "image_size": 224,
+    },
     "groundnut": {
         "type": "onnx",
         "url": ONNX_BASE + "/models-v2/groundnut_effnetb0.onnx",
