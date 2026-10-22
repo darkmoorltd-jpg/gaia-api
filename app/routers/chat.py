@@ -11,8 +11,13 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "openai/gpt-oss-120b"
 
 LANG_NAMES = {
-    "en": "English", "ha": "Hausa", "yo": "Yoruba",
-    "ig": "Igbo", "fr": "French", "sw": "Kiswahili",
+    "en": "English", "ha": "Hausa", "yo": "Yoruba", "ig": "Igbo",
+    "pcm": "Nigerian Pidgin", "fr": "French", "sw": "Kiswahili",
+    "pt": "Portuguese", "ar": "Arabic", "am": "Amharic",
+    "zu": "Zulu", "af": "Afrikaans", "so": "Somali",
+    "es": "Spanish", "de": "German", "it": "Italian",
+    "nl": "Dutch", "hi": "Hindi", "zh": "Simplified Chinese",
+    "tr": "Turkish", "ru": "Russian",
 }
 
 

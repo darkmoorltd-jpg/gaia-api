@@ -18,13 +18,28 @@ YARN_KEY = os.environ.get("YARNGPT_API_KEY", "")
 
 # Native voice per language
 VOICE_MAP = {
-    "yo":  "idera",       # Yoruba
-    "ig":  "chinenye",    # Igbo
-    "ha":  "umar",        # Hausa
-    "en":  "mary",        # Nigerian English
+    # YarnGPT native African voices
+    "yo":  "idera",
+    "ig":  "chinenye",
+    "ha":  "umar",
+    "en":  "mary",
     "pcm": "mary",
-    "fr":  "mary",        # French via polyglot voice
-    "sw":  "mary",        # Swahili via polyglot voice
+    "fr":  "mary",
+    "sw":  "mary",
+    "pt":  "mary",
+    "ar":  "mary",
+    "am":  "mary",
+    "zu":  "mary",
+    "af":  "mary",
+    "so":  "mary",
+    "es":  "mary",
+    "de":  "mary",
+    "it":  "mary",
+    "nl":  "mary",
+    "hi":  "mary",
+    "zh":  "mary",
+    "tr":  "mary",
+    "ru":  "mary",
 }
 
 

@@ -9,6 +9,15 @@ TEXT_MODEL = "openai/gpt-oss-120b"
 VISION_MODEL = "qwen/qwen3.8-27b"
 WHISPER_MODEL = "whisper-large-v3-turbo"
 
+LANG_NAMES = {
+    "en": "English", "ha": "Hausa", "yo": "Yoruba", "ig": "Igbo",
+    "pcm": "Nigerian Pidgin", "fr": "French", "sw": "Kiswahili",
+    "pt": "Portuguese", "ar": "Arabic", "am": "Amharic",
+    "zu": "Zulu", "af": "Afrikaans", "so": "Somali",
+    "es": "Spanish", "de": "German", "it": "Italian",
+    "nl": "Dutch", "hi": "Hindi", "zh": "Chinese", "tr": "Turkish", "ru": "Russian",
+}
+
 SYSTEM_PROMPT = """You are GAIA, an expert African agricultural advisor built by Darkmoor Ltd.
 
 RESPONSE LENGTH RULES (IMPORTANT):
