@@ -8,7 +8,7 @@ import hmac
 import hashlib
 import requests as _requests
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Header
 from pydantic import BaseModel
 from typing import Optional
 
@@ -229,3 +229,104 @@ async def webhook(request: Request):
             print("[webhook] credit failed:", e)
 
     return {"ok": True}
+
+@router.post("/webhook/nowpayments/test")
+async def webhook_test(request: Request, authorization: str = Header(None)):
+    """Admin-only test webhook — bypasses NOWPayments signature.
+    Use this to verify credit logic without a real payment."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing token")
+
+    token = authorization.split(" ", 1)[1]
+
+    # Verify the caller is the admin
+    try:
+        r = _requests.get(
+            SUPABASE_URL + "/auth/v1/user",
+            headers={"apikey": SUPABASE_KEY, "Authorization": "Bearer " + token},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            raise HTTPException(401, "Invalid token")
+        email = (r.json().get("email") or "").lower()
+        if email != "darkmoorltd@gmail.com":
+            raise HTTPException(403, "Admin only")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(401, "Auth failed")
+
+    body = await request.body()
+    try:
+        data = json.loads(body)
+    except Exception:
+        raise HTTPException(400, "Bad JSON")
+
+    invoice_id = str(data.get("invoice_id") or "")
+    if not invoice_id:
+        raise HTTPException(400, "invoice_id required")
+
+    # Find invoice row
+    r = _requests.get(
+        SUPABASE_URL + "/rest/v1/crypto_payments?select=*&invoice_id=eq." + invoice_id,
+        headers=_supa_headers(), timeout=15,
+    )
+    rows = r.json() if r.status_code == 200 else []
+    if not rows:
+        raise HTTPException(404, "Invoice not found: " + invoice_id)
+
+    row = rows[0]
+    if row.get("status") in ("finished", "credited"):
+        return {"ok": True, "already_credited": True, "scans": row["scans_to_add"]}
+
+    user_id = row["user_id"]
+    scans = int(row["scans_to_add"])
+    plan_key = row["plan"]
+
+    # Credit scans
+    try:
+        cur = _requests.get(
+            SUPABASE_URL + "/rest/v1/user_scans?select=scans_remaining&user_id=eq." + user_id,
+            headers=_supa_headers(), timeout=15,
+        )
+        cur_rows = cur.json() if cur.status_code == 200 else []
+        current = cur_rows[0]["scans_remaining"] if cur_rows else 0
+        new_total = current + scans
+
+        _requests.patch(
+            SUPABASE_URL + "/rest/v1/user_scans?user_id=eq." + user_id,
+            headers=_supa_headers(),
+            json={"scans_remaining": new_total, "plan": plan_key},
+            timeout=15,
+        )
+
+        _requests.post(
+            SUPABASE_URL + "/rest/v1/payment_history",
+            headers=_supa_headers(),
+            json={
+                "user_id": user_id,
+                "amount": row["price_amount"],
+                "scans_added": scans,
+                "plan": plan_key,
+                "reference": "CRYPTO_" + invoice_id,
+            },
+            timeout=15,
+        )
+
+        _requests.patch(
+            SUPABASE_URL + "/rest/v1/crypto_payments?invoice_id=eq." + invoice_id,
+            headers=_supa_headers(),
+            json={"status": "credited", "updated_at": datetime.now().isoformat()},
+            timeout=15,
+        )
+    except Exception as e:
+        raise HTTPException(500, "Credit failed: " + str(e)[:100])
+
+    return {
+        "ok": True,
+        "credited": scans,
+        "new_total": new_total,
+        "user_id": user_id,
+        "plan": plan_key,
+    }
+
