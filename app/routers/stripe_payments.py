@@ -24,9 +24,20 @@ ANNUAL_PLAN = {
 }
 
 ALLOWED_COUNTRIES = {
+    # Europe
     "GB", "IE", "FR", "DE", "NL", "BE", "CH", "AT", "IT", "ES", "PT",
     "GR", "PL", "CZ", "HU", "RO", "BG", "HR", "FI", "SE", "NO", "DK",
-    "UA", "RU", "US", "CA", "MX", "AU", "NZ",
+    "UA", "RU",
+    # North America
+    "US", "CA", "MX",
+    # Oceania
+    "AU", "NZ",
+    # Asia
+    "IN", "CN", "JP", "KR", "ID", "VN", "TH", "PH", "MY", "SG", "PK",
+    "BD", "LK", "NP", "MM", "KH", "LA",
+    # Middle East / Arab
+    "SA", "AE", "EG", "MA", "DZ", "TN", "LY", "SD", "IQ", "JO", "LB",
+    "KW", "QA", "BH", "OM", "YE", "PS", "SY", "TR", "IL", "IR",
 }
 
 
