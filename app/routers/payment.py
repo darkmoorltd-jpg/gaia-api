@@ -1,12 +1,15 @@
 # app/routers/payment.py
-import os, logging, httpx
-from fastapi import APIRouter, Header, HTTPException
+import os, logging, httpx, time
+from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 log = logging.getLogger('gaia.payment')
 router = APIRouter()
 
 PAYSTACK_SECRET = os.environ.get("PAYSTACK_SECRET_KEY", "")
+FLW_SECRET = os.environ.get("FLW_SECRET_KEY", "")
+FLW_BASE = "https://api.flutterwave.com/v3"
 PAYSTACK_VERIFY = "https://api.paystack.co/transaction/verify/"
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://pxvtvuwlpzwlkdoxjrep.supabase.co")
 SUPABASE_SERVICE = os.environ.get("SUPABASE_SERVICE_KEY", "")
@@ -135,3 +138,117 @@ async def verify(body: VerifyBody, authorization: str = Header(None)):
 @router.get("/payment/plans")
 async def plans():
     return {"plans": [{"key": k, "scans": v["scans"], "naira": v["kobo"] / 100} for k, v in PLANS.items()]}
+
+# ============================================================
+# FLUTTERWAVE ENDPOINTS
+# ============================================================
+
+class FLWInitiateBody(BaseModel):
+    plan: str
+    currency: str = "NGN"
+
+
+@router.post("/payment/flutterwave/initiate")
+async def flw_initiate(body: FLWInitiateBody, authorization: str = Header(None)):
+    if not FLW_SECRET:
+        raise HTTPException(500, "FLW_SECRET_KEY not configured")
+    if body.plan not in PLANS:
+        raise HTTPException(400, "Unknown plan")
+    uid = await _uid(authorization)
+    plan = PLANS[body.plan]
+
+    # Fetch user email
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        r = await c.get(SUPABASE_URL + "/auth/v1/admin/users/" + uid,
+                        headers={"apikey": SUPABASE_SERVICE, "Authorization": "Bearer " + SUPABASE_SERVICE})
+    email = r.json().get("email", "") if r.status_code == 200 else ""
+
+    tx_ref = "GAIA_FLW_" + body.plan.upper() + "_" + uid[:6] + "_" + str(int(time.time()))
+
+    payload = {
+        "tx_ref": tx_ref,
+        "amount": plan["kobo"] / 100,
+        "currency": body.currency,
+        "redirect_url": "https://gaia-api-xuly.onrender.com/payment/flutterwave/return",
+        "customer": {"email": email},
+        "customizations": {
+            "title": "GAIA Scans",
+            "description": str(plan["scans"]) + " scans - " + body.plan,
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as c:
+        r = await c.post(FLW_BASE + "/payments",
+                         headers={"Authorization": "Bearer " + FLW_SECRET, "Content-Type": "application/json"},
+                         json=payload)
+    if r.status_code != 200:
+        raise HTTPException(500, "Flutterwave initiate failed: " + r.text[:200])
+    data = r.json()
+    if data.get("status") != "success":
+        raise HTTPException(500, "Flutterwave error: " + str(data.get("message", "")))
+
+    return {"checkout_url": data["data"]["link"], "tx_ref": tx_ref}
+
+
+@router.post("/payment/flutterwave/verify")
+async def flw_verify(body: VerifyBody, authorization: str = Header(None)):
+    if not FLW_SECRET:
+        raise HTTPException(500, "FLW_SECRET_KEY not configured")
+    if body.plan not in PLANS:
+        raise HTTPException(400, "Unknown plan")
+    uid = await _uid(authorization)
+    plan = PLANS[body.plan]
+
+    async with httpx.AsyncClient(timeout=20.0) as c:
+        r = await c.get(FLW_BASE + "/transactions/verify_by_reference",
+                        headers={"Authorization": "Bearer " + FLW_SECRET},
+                        params={"tx_ref": body.reference})
+    if r.status_code != 200:
+        raise HTTPException(400, "Flutterwave verify failed HTTP " + str(r.status_code))
+    data = r.json()
+    if data.get("status") != "success":
+        raise HTTPException(400, "Verification failed: " + str(data.get("message", "")))
+    txn = data.get("data", {})
+    if txn.get("status") != "successful":
+        raise HTTPException(400, "Not successful: " + str(txn.get("status")))
+    amt = float(txn.get("amount", 0))
+    if amt < plan["kobo"] / 100:
+        raise HTTPException(400, "Amount too low")
+
+    # Check duplicate
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        r = await c.get(SUPABASE_URL + "/rest/v1/payment_history", headers=_h(),
+                        params={"reference": "eq." + body.reference, "select": "id"})
+        if r.status_code == 200 and r.json():
+            raise HTTPException(409, "Reference already used")
+
+    cur = await _scan_row(uid)
+    new_total = int(cur.get("scans_remaining", 30) or 30) + plan["scans"]
+    lt = int(cur.get("lifetime_scans_purchased", 0) or 0)
+
+    await _upsert_scans(uid, {
+        "scans_remaining": new_total,
+        "plan": body.plan,
+        "lifetime_scans_purchased": lt + plan["scans"],
+    })
+
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        await c.post(SUPABASE_URL + "/rest/v1/payment_history", headers=_h(),
+                     json={"user_id": uid, "amount": amt, "plan": body.plan,
+                           "reference": body.reference, "scans_added": plan["scans"]})
+
+    return {"ok": True, "scans_added": plan["scans"], "new_balance": new_total,
+            "plan": body.plan, "amount_naira": amt}
+
+
+@router.get("/payment/flutterwave/return")
+async def flw_return():
+    return HTMLResponse("""
+    <!DOCTYPE html>
+    <html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+    <body style="font-family:-apple-system,sans-serif;text-align:center;padding:60px 20px;background:#0a0e0c;color:#fff;">
+      <h2 style="color:#00ff88;">Payment complete</h2>
+      <p>Returning to GAIA...</p>
+    </body></html>
+    """)
+
