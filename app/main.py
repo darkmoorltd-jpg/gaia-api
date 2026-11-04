@@ -36,6 +36,7 @@ from app.routers.season import router as season_router
 from app.routers.cron import router as cron_router
 from app.routers.admin_push import router as admin_push_router
 from app.routers.agronomist import router as agronomist_router
+from app.routers.ndfr import router as ndfr_router
 
 registry = None
 
@@ -80,6 +81,7 @@ app.include_router(season_router)
 app.include_router(cron_router)
 app.include_router(admin_push_router)
 app.include_router(agronomist_router)
+app.include_router(ndfr_router)
 
 app.add_middleware(
     CORSMiddleware,
