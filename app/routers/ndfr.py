@@ -149,8 +149,18 @@ async def validate_polygon(req: PolygonValidateRequest):
         raise HTTPException(500, "Sentinel auth failed")
 
     evalscript = """//VERSION=3
-function setup() { return { input: ["B04","B08"], output: { bands: 1 } }; }
+function setup() {
+  return {
+    input: [{ bands: ["B04", "B08", "SCL"], units: "REFLECTANCE" }],
+    output: { bands: 1 }
+  };
+}
 function evaluatePixel(s) {
+  // SCL classes: 3=cloud shadow, 8=cloud medium prob, 9=cloud high prob, 10=thin cirrus, 11=snow
+  let scl = s.SCL;
+  if (scl === 3 || scl === 8 || scl === 9 || scl === 10 || scl === 11) {
+    return [128]; // neutral gray for clouds/masks — will be filtered out
+  }
   let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04 + 0.001);
   return [(ndvi + 1) / 2 * 255];
 }"""
@@ -158,7 +168,7 @@ function evaluatePixel(s) {
     payload = {
         "input": {
             "bounds": {"bbox": bbox, "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}},
-            "data": [{"type": "sentinel-2-l1c",
+            "data": [{"type": "sentinel-2-l2a",
                       "dataFilter": {"maxCloudCoverage": 40,
                                      "timeRange": {"from": "2026-01-01T00:00:00Z", "to": "2026-12-31T23:59:59Z"}}}]
         },
@@ -199,18 +209,34 @@ function evaluatePixel(s) {
             return {"validated": False,
                     "reason": "TIFF has 0 pixels",
                     "farmer_id": req.farmer_id, "retry": True}
-        # Convert 0-255 back to -1..1
-        ndvi_arr = (arr / 255.0) * 2 - 1
+
+        # Filter out masked pixels (value == 128, our neutral gray marker)
+        valid_mask = arr != 128
+        valid_count = int(valid_mask.sum())
+        if valid_count < 100:
+            return {"validated": False,
+                    "reason": f"Only {valid_count}/{total_pixels} clear pixels (cloud/mask)",
+                    "farmer_id": req.farmer_id, "retry": True}
+
+        # Convert 0-255 back to -1..1 using only valid pixels
+        ndvi_arr = ((arr[valid_mask] / 255.0) * 2) - 1
         mean_ndvi = float(ndvi_arr.mean())
-        # Sanity check
         min_v = float(ndvi_arr.min())
         max_v = float(ndvi_arr.max())
+
         if not math.isfinite(mean_ndvi):
             return {"validated": False,
                     "reason": f"NDVI is NaN (min={min_v:.3f}, max={max_v:.3f})",
                     "farmer_id": req.farmer_id, "retry": True}
+
+        # Sanity: reject impossible NDVI (real vegetation is 0.2 to 0.92)
+        if mean_ndvi > 0.95:
+            return {"validated": False,
+                    "reason": f"NDVI {mean_ndvi:.3f} is implausible (likely full cloud cover)",
+                    "farmer_id": req.farmer_id, "retry": True}
+
         mean_ndvi = round(mean_ndvi, 4)
-        is_valid = mean_ndvi > 0.2
+        is_valid = 0.2 < mean_ndvi < 0.92
     except Exception as e:
         return {"validated": False,
                 "reason": "TIFF parse failed: " + str(e)[:150],
@@ -234,5 +260,7 @@ function evaluatePixel(s) {
             "mean_ndvi": mean_ndvi,
             "min_ndvi": round(min_v, 4),
             "max_ndvi": round(max_v, 4),
-            "pixels_analyzed": total_pixels,
+            "clear_pixels": valid_count,
+            "total_pixels": total_pixels,
+            "cloud_cover_pct": round(100 * (1 - valid_count / total_pixels), 1),
             "farmer_id": req.farmer_id}
