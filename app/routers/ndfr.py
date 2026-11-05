@@ -186,25 +186,47 @@ function evaluatePixel(s) {
                 "retry": True,
                 "hint": "Verify Sentinel Hub account has access to sentinel-2-l1c"}
 
+    # ---- Parse the TIFF ----
     try:
         import numpy as np
         import io
+        import math
         from PIL import Image
         img = Image.open(io.BytesIO(r.content))
         arr = np.array(img, dtype=np.float32)
+        # Sanity: shape and value range
+        shape_str = str(arr.shape)
+        finite_count = int(np.isfinite(arr).sum())
+        total_pixels = int(arr.size)
+        if finite_count == 0:
+            return {"validated": False,
+                    "reason": f"TIFF has no finite pixels (shape={shape_str}, total={total_pixels})",
+                    "farmer_id": req.farmer_id, "retry": True}
         mean_ndvi = float(np.nanmean(arr))
+        if not math.isfinite(mean_ndvi):
+            return {"validated": False,
+                    "reason": f"NDVI is NaN/Inf (shape={shape_str}, finite={finite_count}/{total_pixels})",
+                    "farmer_id": req.farmer_id, "retry": True}
+        mean_ndvi = round(mean_ndvi, 4)
         is_valid = mean_ndvi > 0.2
+    except Exception as e:
+        return {"validated": False,
+                "reason": "TIFF parse failed: " + str(e)[:150],
+                "farmer_id": req.farmer_id, "retry": True}
 
+    # ---- Write to DB (isolated so we know if write fails) ----
+    try:
         _supabase().table("farmer_registry").update({
             "ndvi_validated": is_valid,
             "ndvi_value": mean_ndvi,
             "polygon_validated_at": __import__("datetime").datetime.utcnow().isoformat(),
         }).eq("user_id", req.farmer_id).execute()
-
-        return {"validated": True, "is_vegetation": is_valid,
-                "mean_ndvi": round(mean_ndvi, 4),
-                "farmer_id": req.farmer_id}
     except Exception as e:
         return {"validated": False,
-                "reason": "Parse error: " + str(e)[:120],
+                "reason": "DB write failed: " + str(e)[:150],
+                "mean_ndvi": mean_ndvi,
                 "farmer_id": req.farmer_id, "retry": True}
+
+    return {"validated": True, "is_vegetation": is_valid,
+            "mean_ndvi": mean_ndvi,
+            "farmer_id": req.farmer_id}
