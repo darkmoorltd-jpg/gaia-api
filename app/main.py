@@ -38,6 +38,7 @@ from app.routers.admin_push import router as admin_push_router
 from app.routers.agronomist import router as agronomist_router
 from app.routers.ndfr import router as ndfr_router
 from app.routers.state_import import router as state_import_router
+from app.routers.ndfr_claim import router as ndfr_claim_router
 
 registry = None
 
@@ -84,6 +85,7 @@ app.include_router(admin_push_router)
 app.include_router(agronomist_router)
 app.include_router(ndfr_router)
 app.include_router(state_import_router)
+app.include_router(ndfr_claim_router)
 
 app.add_middleware(
     CORSMiddleware,
