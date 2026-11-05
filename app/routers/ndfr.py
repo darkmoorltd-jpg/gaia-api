@@ -151,18 +151,14 @@ async def validate_polygon(req: PolygonValidateRequest):
     evalscript = """//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B04", "B08", "SCL"], units: "REFLECTANCE" }],
-    output: { bands: 1 }
+    input: [{ bands: ["B04", "B08", "dataMask"], units: "DN" }],
+    output: { bands: 1, sampleType: "FLOAT32" }
   };
 }
 function evaluatePixel(s) {
-  // SCL classes: 3=cloud shadow, 8=cloud medium prob, 9=cloud high prob, 10=thin cirrus, 11=snow
-  let scl = s.SCL;
-  if (scl === 3 || scl === 8 || scl === 9 || scl === 10 || scl === 11) {
-    return [128]; // neutral gray for clouds/masks — will be filtered out
-  }
-  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04 + 0.001);
-  return [(ndvi + 1) / 2 * 255];
+  if (s.dataMask === 0) return [NaN];
+  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04 + 0.0001);
+  return [ndvi];
 }"""
 
     payload = {
