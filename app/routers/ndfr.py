@@ -149,10 +149,10 @@ async def validate_polygon(req: PolygonValidateRequest):
         raise HTTPException(500, "Sentinel auth failed")
 
     evalscript = """//VERSION=3
-function setup() { return { input: ["B04","B08"], output: { bands: 1, sampleType: "FLOAT32" } }; }
+function setup() { return { input: ["B04","B08"], output: { bands: 1 } }; }
 function evaluatePixel(s) {
-  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04 + 0.0001);
-  return [ndvi];
+  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04 + 0.001);
+  return [(ndvi + 1) / 2 * 255];
 }"""
 
     payload = {
@@ -186,26 +186,28 @@ function evaluatePixel(s) {
                 "retry": True,
                 "hint": "Verify Sentinel Hub account has access to sentinel-2-l1c"}
 
-    # ---- Parse the TIFF ----
+    # ---- Parse the TIFF (UINT8, scale back to NDVI -1..1) ----
     try:
         import numpy as np
         import io
         import math
         from PIL import Image
-        img = Image.open(io.BytesIO(r.content))
+        img = Image.open(io.BytesIO(r.content)).convert("L")
         arr = np.array(img, dtype=np.float32)
-        # Sanity: shape and value range
-        shape_str = str(arr.shape)
-        finite_count = int(np.isfinite(arr).sum())
         total_pixels = int(arr.size)
-        if finite_count == 0:
+        if total_pixels == 0:
             return {"validated": False,
-                    "reason": f"TIFF has no finite pixels (shape={shape_str}, total={total_pixels})",
+                    "reason": "TIFF has 0 pixels",
                     "farmer_id": req.farmer_id, "retry": True}
-        mean_ndvi = float(np.nanmean(arr))
+        # Convert 0-255 back to -1..1
+        ndvi_arr = (arr / 255.0) * 2 - 1
+        mean_ndvi = float(ndvi_arr.mean())
+        # Sanity check
+        min_v = float(ndvi_arr.min())
+        max_v = float(ndvi_arr.max())
         if not math.isfinite(mean_ndvi):
             return {"validated": False,
-                    "reason": f"NDVI is NaN/Inf (shape={shape_str}, finite={finite_count}/{total_pixels})",
+                    "reason": f"NDVI is NaN (min={min_v:.3f}, max={max_v:.3f})",
                     "farmer_id": req.farmer_id, "retry": True}
         mean_ndvi = round(mean_ndvi, 4)
         is_valid = mean_ndvi > 0.2
@@ -227,6 +229,10 @@ function evaluatePixel(s) {
                 "mean_ndvi": mean_ndvi,
                 "farmer_id": req.farmer_id, "retry": True}
 
-    return {"validated": True, "is_vegetation": is_valid,
+    return {"validated": True,
+            "is_vegetation": is_valid,
             "mean_ndvi": mean_ndvi,
+            "min_ndvi": round(min_v, 4),
+            "max_ndvi": round(max_v, 4),
+            "pixels_analyzed": total_pixels,
             "farmer_id": req.farmer_id}
