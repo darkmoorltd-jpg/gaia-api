@@ -151,14 +151,17 @@ async def validate_polygon(req: PolygonValidateRequest):
     evalscript = """//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B04", "B08", "dataMask"], units: "DN" }],
-    output: { bands: 1, sampleType: "FLOAT32" }
+    input: [{ bands: ["B04", "B08", "dataMask"] }],
+    output: { bands: 2, sampleType: "FLOAT32" }
   };
 }
 function evaluatePixel(s) {
-  if (s.dataMask === 0) return [NaN];
-  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04 + 0.0001);
-  return [ndvi];
+  if (s.dataMask === 0) return [NaN, 0];
+  // Explicitly divide DN by 10000 to get 0-1 reflectance
+  let b04 = s.B04 / 10000.0;
+  let b08 = s.B08 / 10000.0;
+  let ndvi = (b08 - b04) / (b08 + b04 + 0.0001);
+  return [ndvi, s.dataMask];
 }"""
 
     payload = {
@@ -169,7 +172,7 @@ function evaluatePixel(s) {
                                      "timeRange": {"from": "2026-01-01T00:00:00Z", "to": "2026-12-31T23:59:59Z"}}}]
         },
         "output": {"width": 128, "height": 128,
-                   "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}]},
+                   "responses": [{"identifier": "default", "format": {"type": "image/tiff", "sampleType": "FLOAT32"}}]},
         "evalscript": evalscript,
     }
 

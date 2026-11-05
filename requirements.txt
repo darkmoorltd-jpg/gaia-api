@@ -23,3 +23,5 @@ pandas
 openpyxl
 Pillow
 numpy
+
+tifffile
