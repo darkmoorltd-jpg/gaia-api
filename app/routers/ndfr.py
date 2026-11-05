@@ -125,7 +125,7 @@ def _sentinel_token():
     import base64
     creds = base64.b64encode(f"{SENTINEL_CLIENT_ID}:{SENTINEL_CLIENT_SECRET}".encode()).decode()
     r = requests.post(
-        "https://services.sentinel-hub.com/oauth/token",
+        "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
         headers={"Authorization": f"Basic {creds}", "Content-Type": "application/x-www-form-urlencoded"},
         data={"grant_type": "client_credentials"},
         timeout=20,
@@ -169,7 +169,7 @@ function evaluatePixel(s) {
 
     try:
         r = requests.post(
-            "https://services.sentinel-hub.com/api/v1/process",
+            "https://sh.dataspace.copernicus.eu/api/v1/process",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json=payload, timeout=45,
         )
