@@ -123,105 +123,107 @@ async def satellite_ndvi(
     lat: float = Query(...),
     lon: float = Query(...),
     days: int = Query(30),
+    time_mode: str = Query("latest"),
 ):
-    """Return numeric mean NDVI + NDMI for a small area."""
-    token = await _get_token()
-    delta = 0.003
-    bbox = [lon - delta, lat - delta, lon + delta, lat + delta]
-    from_dt = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86400))
-    to_dt = time.strftime("%Y-%m-%d", time.gmtime())
-
-    evalscript = """//VERSION=3
-    function setup() {
-        return {
-            input: ["B04","B08","B11","SCL"],
-            output: [
-                { id: "ndvi", bands: 1, sampleType: "FLOAT32" },
-                { id: "ndmi", bands: 1, sampleType: "FLOAT32" },
-                { id: "dataMask", bands: 1 }
-            ]
-        };
-    }
-    function evaluatePixel(s) {
-        let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04 + 0.0001);
-        let ndmi = (s.B08 - s.B11) / (s.B08 + s.B11 + 0.0001);
-        let cloud = [3, 8, 9, 10].includes(s.SCL) ? 0 : 1;
-        return { ndvi: [ndvi], ndmi: [ndmi], dataMask: [cloud] };
-    }"""
-
-    payload = {
-        "input": {
-            "bounds": {"bbox": bbox, "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}},
-            "data": [{
-                "type": "sentinel-2-l2a",
-                "dataFilter": {
-                    "timeRange": {"from": from_dt + "T00:00:00Z", "to": to_dt + "T23:59:59Z"},
-                    "maxCloudCoverage": 40,
-                    "mosaickingOrder": "leastCC",
-                },
-            }],
-        },
-        "aggregation": {
-            "timeRange": {"from": from_dt + "T00:00:00Z", "to": to_dt + "T23:59:59Z"},
-            "aggregationInterval": {"of": "P7D"},
-            "evalscript": evalscript,
-            "resx": 10,
-            "resy": 10,
-        },
-        "calculations": {
-            "default": {
-                "statistics": {"default": {"percentiles": {"k": [50]}}}
-            }
-        },
-    }
-
-    async with httpx.AsyncClient(timeout=90) as client:
-        r = await client.post(
-            STATS_URL,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json=payload,
-        )
-    if r.status_code != 200:
-        raise HTTPException(502, "Sentinel stats failed: " + r.text[:200])
+    """Compute NDVI from Copernicus WMTS tile via pixel counting.
+    Uses the same algorithm as the mobile app for consistency."""
+    import math
+    from io import BytesIO
+    from PIL import Image
 
     try:
-        body = r.json()
-    except Exception:
-        raise HTTPException(502, "Sentinel returned invalid JSON")
+        # Convert lat/lon to WMTS tile coords (zoom 14 = ~10m/px, good for farm)
+        zoom = 14
+        n = 2.0 ** zoom
+        lat_rad = math.radians(lat)
+        xtile = int((lon + 180.0) / 360.0 * n)
+        ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
 
-    series = []
-    for interval in body.get("data", []):
-        interval_from = interval.get("interval", {}).get("from", "")
-        ndvi_stats = (
-            interval.get("outputs", {})
-            .get("ndvi", {})
-            .get("bands", {})
-            .get("B0", {})
-            .get("stats", {})
-        )
-        ndmi_stats = (
-            interval.get("outputs", {})
-            .get("ndmi", {})
-            .get("bands", {})
-            .get("B0", {})
-            .get("stats", {})
-        )
-        ndvi_p50 = ndvi_stats.get("percentiles", {}).get("50.0")
-        ndmi_p50 = ndmi_stats.get("percentiles", {}).get("50.0")
-        if ndvi_p50 is None:
-            continue
-        series.append({
-            "date": interval_from[:10],
-            "ndvi": round(float(ndvi_p50), 4),
-            "ndmi": round(float(ndmi_p50), 4) if ndmi_p50 is not None else None,
-        })
+        # Time parameter
+        if time_mode == "peak":
+            time_param = "2024-07-01/2024-09-30"
+        elif time_mode == "30d":
+            from_dt = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 30 * 86400))
+            to_dt = time.strftime("%Y-%m-%d", time.gmtime())
+            time_param = from_dt + "/" + to_dt
+        else:
+            time_param = "2023-01-01/2026-12-31"
 
-    latest = series[-1] if series else None
-    return {
-        "ok": True,
-        "series": series,
-        "latest": latest,
-    }
+        # Fetch tile from WMTS
+        token = await _get_token()
+        url = (
+            WMTS_BASE + "?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0"
+            "&LAYER=NDVI&STYLE=default&TILEMATRIXSET=PopularWebMercator256"
+            "&TILEMATRIX=" + str(zoom) + "&TILEROW=" + str(ytile) + "&TILECOL=" + str(xtile) +
+            "&FORMAT=image/png&TIME=" + time_param + "&access_token=" + token
+        )
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url)
+
+        if r.status_code != 200:
+            raise HTTPException(502, "WMTS tile fetch failed: " + r.text[:200])
+
+        # Decode PNG and count pixels by color bucket
+        img = Image.open(BytesIO(r.content)).convert('RGB')
+        pixels = list(img.getdata())
+        total = len(pixels)
+
+        # Copernicus NDVI evalscript color buckets:
+        # RED       [0.6, 0.2, 0.1]   → ndvi < 0.2  (bare/water)
+        # ORANGE    [1, 0.4, 0.2]     → 0.2-0.4     (sparse)
+        # YELLOW    [1, 0.8, 0.2]     → 0.4-0.6     (moderate)
+        # LGREEN    [0.6, 0.9, 0.2]   → 0.6-0.8     (good)
+        # DGREEN    [0, 0.8, 0.3]     → > 0.8       (excellent)
+
+        red = sum(1 for p in pixels if p[0] > 130 and p[1] < 100 and p[2] < 80)
+        orange = sum(1 for p in pixels if p[0] > 200 and 80 < p[1] < 150 and p[2] < 100)
+        yellow = sum(1 for p in pixels if p[0] > 200 and p[1] > 180 and p[2] < 100)
+        lgreen = sum(1 for p in pixels if 120 < p[0] < 200 and p[1] > 180 and p[2] < 120)
+        dgreen = sum(1 for p in pixels if p[0] < 100 and p[1] > 180 and p[2] < 150)
+
+        # Weighted average NDVI
+        weighted = (
+            red * 0.1 +
+            orange * 0.3 +
+            yellow * 0.5 +
+            lgreen * 0.7 +
+            dgreen * 0.9
+        )
+        avg_ndvi = (weighted / total) if total > 0 else 0.0
+
+        status = (
+            "healthy" if avg_ndvi >= 0.6 else
+            "moderate" if avg_ndvi >= 0.4 else
+            "stressed" if avg_ndvi >= 0.2 else
+            "bare"
+        )
+
+        return {
+            "ok": True,
+            "latest": {
+                "date": time.strftime("%Y-%m-%d"),
+                "ndvi": round(avg_ndvi, 3),
+                "ndmi": None,
+            },
+            "series": [],
+            "status": status,
+            "pixel_breakdown": {
+                "red": red,
+                "orange": orange,
+                "yellow": yellow,
+                "light_green": lgreen,
+                "dark_green": dgreen,
+                "total": total,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("NDVI compute failed")
+        raise HTTPException(500, "NDVI compute failed: " + str(e)[:200])
+
 
 
 # ============================================================
