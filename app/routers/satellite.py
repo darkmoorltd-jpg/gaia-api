@@ -11,12 +11,13 @@ from fastapi.responses import Response
 log = logging.getLogger('gaia.satellite')
 router = APIRouter()
 
-CLIENT_ID = os.environ.get("SENTINEL_CLIENT_ID", "86ed44fa-793b-47da-973b-345a83ae18c0")
-CLIENT_SECRET = os.environ.get("SENTINEL_CLIENT_SECRET", "qYTQXnQFpgstJSrAulJ6NREflI2m2eCN")
+CLIENT_ID = os.environ.get("SENTINEL_CLIENT_ID", "sh-866fb988-5387-4d82-bb2d-6c2c2aab2e60")
+CLIENT_SECRET = os.environ.get("SENTINEL_CLIENT_SECRET", "jG8r1sNnkLLHYAuhUMzDSwcwSwywvu3IV0nhRdAinNDeadueT5qANvRIgy4lo9rd2K1qzVPt21e5lQ7pEazC7h")
+INSTANCE_ID = os.environ.get("SENTINEL_INSTANCE_ID", "575061f7-641d-4d0c-afd2-7cc9516e1848")
 
-TOKEN_URL = "https://services.sentinel-hub.com/oauth/token"
-PROCESS_URL = "https://services.sentinel-hub.com/api/v1/process"
-STATS_URL = "https://services.sentinel-hub.com/api/v1/statistics"
+TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process"
+STATS_URL = "https://sh.dataspace.copernicus.eu/api/v1/statistics"
 
 _token_cache = {"token": None, "expires_at": 0}
 
@@ -221,3 +222,54 @@ async def satellite_ndvi(
         "series": series,
         "latest": latest,
     }
+
+
+# ============================================================
+# FAST WMTS endpoint (uses your pre-configured Copernicus layers)
+# ============================================================
+WMTS_BASE = f"https://sh.dataspace.copernicus.eu/ogc/wmts/{INSTANCE_ID}"
+
+
+@router.get("/satellite/wmts")
+async def satellite_wmts(
+    lat: float = Query(...),
+    lon: float = Query(...),
+    layer: str = Query("NDVI"),
+    z: int = Query(14),
+    time_mode: str = Query("latest"),
+):
+    """Direct WMTS proxy - much faster than Process API."""
+    import math
+    lat_rad = math.radians(lat)
+    n = 2.0 ** z
+    xtile = int((lon + 180.0) / 360.0 * n)
+    ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+
+    if time_mode == "peak":
+        time_param = "2024-07-01/2024-09-30"
+    elif time_mode == "30d":
+        from_dt = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 30 * 86400))
+        to_dt = time.strftime("%Y-%m-%d", time.gmtime())
+        time_param = f"{from_dt}/{to_dt}"
+    else:
+        time_param = "2023-01-01/2026-12-31"
+
+    token = await _get_token()
+    url = (
+        f"{WMTS_BASE}?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0"
+        f"&LAYER={layer}&STYLE=default&TILEMATRIXSET=PopularWebMercator256"
+        f"&TILEMATRIX={z}&TILEROW={ytile}&TILECOL={xtile}"
+        f"&FORMAT=image/png&TIME={time_param}&access_token={token}"
+    )
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(url)
+
+    if r.status_code != 200:
+        raise HTTPException(502, "WMTS tile failed: " + r.text[:200])
+
+    return Response(
+        content=r.content,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
