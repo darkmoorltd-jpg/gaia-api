@@ -158,7 +158,7 @@ function evaluatePixel(s) {
     payload = {
         "input": {
             "bounds": {"bbox": bbox, "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}},
-            "data": [{"type": "sentinel-2-l2a",
+            "data": [{"type": "sentinel-2-l1c",
                       "dataFilter": {"maxCloudCoverage": 40,
                                      "timeRange": {"from": "2026-01-01T00:00:00Z", "to": "2026-12-31T23:59:59Z"}}}]
         },
@@ -173,9 +173,20 @@ function evaluatePixel(s) {
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json=payload, timeout=45,
         )
-        if r.status_code != 200:
-            raise HTTPException(500, f"Sentinel HTTP {r.status_code}")
+    except Exception as e:
+        return {"validated": False,
+                "reason": "Sentinel network error: " + str(e)[:120],
+                "farmer_id": req.farmer_id, "retry": True}
 
+    if r.status_code != 200:
+        body = r.text[:200] if r.text else ""
+        return {"validated": False,
+                "reason": f"Sentinel HTTP {r.status_code}: {body}",
+                "farmer_id": req.farmer_id,
+                "retry": True,
+                "hint": "Verify Sentinel Hub account has access to sentinel-2-l1c"}
+
+    try:
         import numpy as np
         import io
         from PIL import Image
@@ -193,7 +204,7 @@ function evaluatePixel(s) {
         return {"validated": True, "is_vegetation": is_valid,
                 "mean_ndvi": round(mean_ndvi, 4),
                 "farmer_id": req.farmer_id}
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        return {"validated": False,
+                "reason": "Parse error: " + str(e)[:120],
+                "farmer_id": req.farmer_id, "retry": True}
