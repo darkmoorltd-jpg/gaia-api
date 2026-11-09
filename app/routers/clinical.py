@@ -10,13 +10,16 @@ router = APIRouter()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # ============================================================
-# SUPABASE CLIENT (SERVICE ROLE — bypasses RLS for family checks)
+# SUPABASE CLIENT (SERVICE ROLE)
 # ============================================================
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 def _supabase():
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY env vars must be set")
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
 
 # ============================================================
 # 1. MEAL VISION (Qwen 3.8 via Groq)
@@ -70,7 +73,7 @@ Keep it concise, direct, and in Nigerian context."""
 # ============================================================
 class VitalsRequest(BaseModel):
     user_id: str
-    blood_sugar_mgdl: float | None = None
+    blood_sugar_mgdl: int | None = None
     systolic_bp: int | None = None
     diastolic_bp: int | None = None
 
@@ -78,7 +81,60 @@ class VitalsRequest(BaseModel):
 def log_vitals(req: VitalsRequest):
     import traceback
     try:
-        return _log_vitals_inner(req)
+        sb = _supabase()
+
+        # Cast to int to prevent DB error
+        sugar = int(req.blood_sugar_mgdl) if req.blood_sugar_mgdl is not None else None
+        sys = int(req.systolic_bp) if req.systolic_bp is not None else None
+        dia = int(req.diastolic_bp) if req.diastolic_bp is not None else None
+
+        # 1. Save to DB
+        sb.table("daily_checkins").insert({
+            "user_id": req.user_id,
+            "blood_sugar_mgdl": sugar,
+            "systolic_bp": sys,
+            "diastolic_bp": dia
+        }).execute()
+
+        # 2. Detect critical reading
+        is_critical = (
+            (sys and sys >= 180) or
+            (dia and dia >= 120) or
+            (sugar and sugar >= 300)
+        )
+
+        sms_result = {"sent": False, "sponsors_notified": 0}
+
+        if is_critical:
+            # 3. Find linked family members (Sponsors)
+            links = sb.table("family_links").select("sponsor_id").eq("patient_id", req.user_id).execute()
+
+            for link in (links.data or []):
+                sponsor_id = link["sponsor_id"]
+                profile = sb.table("user_profiles").select("phone, first_name").eq("user_id", sponsor_id).execute()
+
+                if profile.data and profile.data[0].get("phone"):
+                    phone = profile.data[0]["phone"]
+                    name = profile.data[0].get("first_name") or "Family Member"
+                    msg = (
+                        f"GAIA ALERT: {name}, your loved one has a critical reading. "
+                        f"BP: {sys or '?'}/{dia or '?'}, Sugar: {sugar or '?'} mg/dL. "
+                        f"Open GAIA or call them immediately."
+                    )
+                    try:
+                        robase.send_sms(phone, msg)
+                        sms_result["sponsors_notified"] += 1
+                    except Exception as e:
+                        print(f"[ROBASE] SMS failed: {e}")
+
+            sms_result["sent"] = sms_result["sponsors_notified"] > 0
+
+        return {
+            "ok": True,
+            "sms_sent": sms_result["sent"],
+            "sponsors_notified": sms_result["sponsors_notified"]
+        }
+
     except Exception as e:
         return {
             "ok": False,
@@ -86,42 +142,3 @@ def log_vitals(req: VitalsRequest):
             "error": str(e),
             "trace": traceback.format_exc()
         }
-
-def _log_vitals_inner(req: VitalsRequest):
-    sb = _supabase()
-
-    # Save to DB
-    sb.table("daily_checkins").insert({
-        "user_id": req.user_id,
-        "blood_sugar_mgdl": int(req.blood_sugar_mgdl) if req.blood_sugar_mgdl is not None else None,
-        "systolic_bp": int(req.systolic_bp) if req.systolic_bp is not None else None,
-        "diastolic_bp": int(req.diastolic_bp) if req.diastolic_bp is not None else None
-    }).execute()
-
-    # Detect critical
-    is_critical = (
-        (req.systolic_bp and req.systolic_bp >= 180) or
-        (req.diastolic_bp and req.diastolic_bp >= 120) or
-        (req.blood_sugar_mgdl and req.blood_sugar_mgdl >= 300)
-    )
-
-    if is_critical:
-        links = sb.table("family_links").select("sponsor_id").eq("patient_id", req.user_id).execute()
-        for link in links.data or []:
-            sponsor_id = link["sponsor_id"]
-            profile = sb.table("user_profiles").select("phone, first_name").eq("user_id", sponsor_id).execute()
-            if profile.data and profile.data[0].get("phone"):
-                phone = profile.data[0]["phone"]
-                name = profile.data[0].get("first_name") or "Family Member"
-                msg = (
-                    f"GAIA ALERT: {name}, your loved one has a critical reading. "
-                    f"BP: {req.systolic_bp or '?'}/{req.diastolic_bp or '?'}, "
-                    f"Sugar: {req.blood_sugar_mgdl or '?'} mg/dL. "
-                    f"Open GAIA or call them immediately."
-                )
-                try:
-                    robase.send_sms(phone, msg)
-                except Exception as e:
-                    print(f"[ROBASE] SMS failed: {e}")
-
-    return {"ok": True}
