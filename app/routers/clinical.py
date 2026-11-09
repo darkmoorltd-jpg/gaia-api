@@ -93,9 +93,9 @@ def _log_vitals_inner(req: VitalsRequest):
     # Save to DB
     sb.table("daily_checkins").insert({
         "user_id": req.user_id,
-        "blood_sugar_mgdl": req.blood_sugar_mgdl,
-        "systolic_bp": req.systolic_bp,
-        "diastolic_bp": req.diastolic_bp
+        "blood_sugar_mgdl": int(req.blood_sugar_mgdl) if req.blood_sugar_mgdl is not None else None,
+        "systolic_bp": int(req.systolic_bp) if req.systolic_bp is not None else None,
+        "diastolic_bp": int(req.diastolic_bp) if req.diastolic_bp is not None else None
     }).execute()
 
     # Detect critical
