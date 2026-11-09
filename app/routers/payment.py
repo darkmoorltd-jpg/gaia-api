@@ -97,7 +97,8 @@ async def verify(body: VerifyBody, authorization: str = Header(None)):
             raise HTTPException(409, "Reference already used")
 
     cur = await _scan_row(uid)
-    new_total = int(cur.get("scans_remaining", 30) or 30) + plan["scans"]
+    current_balance = int(cur.get("scans_remaining") or 0) if cur else 0
+    new_total = current_balance + plan["scans"]
     lt = int(cur.get("lifetime_scans_purchased", 0) or 0)
 
     await _upsert_scans(uid, {
@@ -223,7 +224,8 @@ async def flw_verify(body: VerifyBody, authorization: str = Header(None)):
             raise HTTPException(409, "Reference already used")
 
     cur = await _scan_row(uid)
-    new_total = int(cur.get("scans_remaining", 30) or 30) + plan["scans"]
+    current_balance = int(cur.get("scans_remaining") or 0) if cur else 0
+    new_total = current_balance + plan["scans"]
     lt = int(cur.get("lifetime_scans_purchased", 0) or 0)
 
     await _upsert_scans(uid, {

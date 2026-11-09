@@ -500,15 +500,22 @@ async def wallet_buy_scans(req: BuyScansReq, authorization: str = Header(None)):
     if new_bal is None:
         raise HTTPException(400, 'Insufficient wallet balance')
 
-    # Credit scans
-    s.table('user_scans').upsert(
-        {'user_id': uid, 'scans_remaining': 30, 'plan': 'free'},
-        on_conflict='user_id'
-    ).execute()
-    sc = s.table('user_scans').select('scans_remaining').eq('user_id', uid).limit(1).execute()
-    cur = int((sc.data[0] if sc.data else {}).get('scans_remaining') or 0)
-    new_scans = cur + plan['scans']
-    s.table('user_scans').update({'scans_remaining': new_scans, 'plan': req.plan}).eq('user_id', uid).execute()
+    # Credit scans — INSERT if missing, NEVER overwrite existing balance
+    existing = s.table('user_scans').select('scans_remaining').eq('user_id', uid).limit(1).execute()
+    if not existing.data or len(existing.data) == 0:
+        s.table('user_scans').insert({
+            'user_id': uid,
+            'scans_remaining': plan['scans'],
+            'plan': req.plan,
+        }).execute()
+        new_scans = plan['scans']
+    else:
+        cur = int(existing.data[0].get('scans_remaining') or 0)
+        new_scans = cur + plan['scans']
+        s.table('user_scans').update({
+            'scans_remaining': new_scans,
+            'plan': req.plan,
+        }).eq('user_id', uid).execute()
 
     ref = 'GAIA_WSCAN_' + uuid.uuid4().hex[:12]
     s.table('wallet_transactions').insert({
