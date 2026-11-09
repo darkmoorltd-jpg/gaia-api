@@ -76,6 +76,18 @@ class VitalsRequest(BaseModel):
 
 @router.post("/clinical/log-vitals")
 def log_vitals(req: VitalsRequest):
+    import traceback
+    try:
+        return _log_vitals_inner(req)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error_type": type(e).__name__,
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }
+
+def _log_vitals_inner(req: VitalsRequest):
     sb = _supabase()
 
     # Save to DB
