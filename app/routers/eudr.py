@@ -101,7 +101,7 @@ def _sentinel_image(bbox, date_from, date_to, size=600):
     //VERSION=3
     function setup() { return { input: ["B04","B03","B02"], output: { bands: 3 } }; }
     function evaluatePixel(s) {
-        return [Math.min(1, s.B04/10000*2.5), Math.min(1, s.B03/10000*2.5), Math.min(1, s.B02/10000*2.5)];
+        return [Math.min(1, s.B04*2.5), Math.min(1, s.B03*2.5), Math.min(1, s.B02*2.5)];
     }
     """
     payload = {
