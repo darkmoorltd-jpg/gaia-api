@@ -18,6 +18,7 @@ from app.routers.chat import router as chat_router
 from app.routers.rag import router as rag_router
 from app.routers.tts import router as tts_router
 from app.routers.agent import router as agent_router
+from app.routers.logistics import router as logistics_router
 from app.routers.clinical import router as clinical_router
 from app.routers.satellite import router as satellite_router
 from app.routers.translate import router as translate_router
@@ -67,6 +68,7 @@ app.include_router(chat_router)
 app.include_router(rag_router)
 app.include_router(tts_router)
 app.include_router(agent_router)
+app.include_router(logistics_router)
 app.include_router(clinical_router)
 app.include_router(satellite_router)
 app.include_router(translate_router)
