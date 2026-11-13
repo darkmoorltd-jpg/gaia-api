@@ -11,6 +11,9 @@ class BatchCreate(BaseModel):
     quantity_kg: float
     quality_grade: str
     location: str
+    harvest_date: str = None
+    moisture_pct: float = None
+    notes: str = None
 
 @router.post("/logistics/batches")
 async def create_batch(batch: BatchCreate, authorization: str = Header(None)):
@@ -29,6 +32,8 @@ async def create_batch(batch: BatchCreate, authorization: str = Header(None)):
     import random, string
     code = "GAI-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
     
+    import datetime as _dt
+    harvest = batch.harvest_date or _dt.date.today().isoformat()
     res = supabase.table("batches").insert({
         "farmer_id": farmer_id,
         "batch_code": code,
@@ -36,6 +41,9 @@ async def create_batch(batch: BatchCreate, authorization: str = Header(None)):
         "quantity_kg": batch.quantity_kg,
         "quality_grade": batch.quality_grade,
         "location": batch.location,
+        "harvest_date": harvest,
+        "moisture_pct": batch.moisture_pct,
+        "notes": batch.notes,
         "status": "active"
     }).execute()
     
