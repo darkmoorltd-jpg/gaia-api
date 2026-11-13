@@ -25,3 +25,5 @@ Pillow
 numpy
 
 tifffile
+
+qrcode
